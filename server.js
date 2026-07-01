@@ -53,13 +53,16 @@ function seedNovaBiomedicalBuyers() {
   const db = readJSON(FILES.buyers, { buyers: [] });
   const today = new Date().toISOString();
 
-  // Step 1 — remove all existing Nova Biomedical buyers
+  // Step 1 — remove Nova Biomedical buyers sourced from web_research only
+  // Preserves manual_research seeds and any manually added buyers with deal history
   const before = db.buyers.length;
-  db.buyers = db.buyers.filter(b =>
-    !(b.categories || []).some(c => c.brand.toLowerCase() === 'nova biomedical')
-  );
+  db.buyers = db.buyers.filter(b => {
+    const isNova = (b.categories || []).some(c => c.brand.toLowerCase() === 'nova biomedical');
+    if (!isNova) return true;
+    return b.source === 'manual_research' || b.source === 'manual';
+  });
   const removed = before - db.buyers.length;
-  console.log(`[SEED] Removed ${removed} existing Nova Biomedical buyers`);
+  console.log(`[SEED] Removed ${removed} web-research Nova Biomedical buyers (manual records preserved)`);
 
   // Step 2 — seed confirmed buyers if not already present by company_name
   const seeds = [
