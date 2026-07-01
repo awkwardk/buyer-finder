@@ -292,11 +292,28 @@ async function runWebSearch(brand, itemType, model) {
       const parsed = parseJSONSafe(text);
       console.log(`[SEARCH] Angle ${i + 1} parsed result — type: ${Array.isArray(parsed) ? 'array[' + parsed.length + ']' : typeof parsed}, value: ${JSON.stringify(parsed || null).slice(0, 300)}`);
 
-      const companies = Array.isArray(parsed) ? parsed : (parsed && parsed.companies ? parsed.companies : []);
+      const rawCompanies = Array.isArray(parsed) ? parsed : (parsed && parsed.companies ? parsed.companies : []);
+
+      // Normalize field names — AI may return "name" instead of "company_name"
+      const companies = rawCompanies.map(c => ({
+        company_name: c.company_name || c.name || c.company || '',
+        website: c.website || c.url || c.site || '',
+        email: c.email || c.contact_email || '',
+        phone: c.phone || c.telephone || c.contact_phone || '',
+        evidence: c.evidence || c.notes || c.description || '',
+      }));
+
+      if (companies.length > 0) {
+        console.log(`[SEARCH] Angle ${i + 1} first company keys: ${Object.keys(rawCompanies[0]).join(', ')}`);
+        console.log(`[SEARCH] Angle ${i + 1} first company normalized: ${JSON.stringify(companies[0])}`);
+      }
 
       let newThisAngle = 0;
       for (const c of companies) {
-        if (!c.company_name) continue;
+        if (!c.company_name) {
+          console.log(`[SEARCH] Angle ${i + 1} skipping company with no name: ${JSON.stringify(c)}`);
+          continue;
+        }
         const key = c.company_name.toLowerCase().trim();
         if (!allBuyers.has(key)) {
           allBuyers.set(key, c);
@@ -496,8 +513,15 @@ app.post('/api/search', upload.array('photos', 5), async (req, res) => {
     } else {
       console.log(`[SEARCH] Only ${existing.length} existing buyers (threshold ${threshold}) — running web search`);
       const found = await runWebSearch(brand, item_type, model);
-      if (found.length > 0) saveBuyersToDb(found, brand, item_type);
+      console.log(`[ROUTE] runWebSearch returned ${found.length} companies`);
+      if (found.length > 0) {
+        const added = saveBuyersToDb(found, brand, item_type);
+        console.log(`[ROUTE] saveBuyersToDb added ${added} new buyers to buyers.json`);
+      } else {
+        console.log(`[ROUTE] runWebSearch returned 0 companies — skipping save`);
+      }
       buyers = getExistingBuyers(brand, item_type);
+      console.log(`[ROUTE] getExistingBuyers returned ${buyers.length} buyers for "${brand}" / "${item_type}"`);
       fromCache = false;
     }
 
