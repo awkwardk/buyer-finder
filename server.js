@@ -23,6 +23,7 @@ const FILES = {
   outreach: path.join(DATA_DIR, 'outreach.json'),
   settings: path.join(DATA_DIR, 'settings.json'),
   tokens: path.join(DATA_DIR, 'gmail-tokens.json'),
+  lookup_job: path.join(DATA_DIR, 'lookup_job.json'),
 };
 
 function ensureDirs() {
@@ -257,6 +258,19 @@ function parseJSONSafe(text) {
   return null;
 }
 
+// ─── Change 2: URL normalization ─────────────────────────────────────────────
+function normalizeWebsite(url) {
+  if (!url || typeof url !== 'string') return url || '';
+  try {
+    const u = new URL(url.startsWith('http') ? url : 'https://' + url);
+    const normalized = u.protocol + '//' + u.hostname;
+    if (normalized !== url && url.length > normalized.length) {
+      console.log(`[BUYERS] Normalized URL: ${url} → ${normalized}`);
+    }
+    return normalized;
+  } catch (_) { return url; }
+}
+
 // ─── Buyer search logic ──────────────────────────────────────────────────────
 function getThreshold(brand, itemType) {
   const settings = readJSON(FILES.settings, { thresholds: [] });
@@ -284,22 +298,34 @@ function saveBuyersToDb(newBuyers, brand, itemType) {
       b.company_name.toLowerCase() === (nb.company_name || '').toLowerCase()
     );
     if (existing) {
+      // Change 1: merge new category into existing record, never duplicate
       const hasCat = (existing.categories || []).some(c =>
         c.brand.toLowerCase() === brand.toLowerCase() &&
         c.item_type.toLowerCase() === itemType.toLowerCase()
       );
       if (!hasCat) {
         existing.categories = existing.categories || [];
-        existing.categories.push({ brand, item_type: itemType, notes: nb.evidence || '' });
+        existing.categories.push({ brand, item_type: itemType, notes: nb.evidence || '', minimum_threshold: 3 });
+        console.log(`[BUYERS] Added category ${brand}/${itemType} to existing buyer: ${existing.company_name}`);
+      }
+      // Change 2: normalize/update website if existing has a path-specific URL
+      if (nb.website) {
+        const normalized = normalizeWebsite(nb.website);
+        const existingNorm = normalizeWebsite(existing.website || '');
+        if (!existing.website || (existing.website !== existingNorm)) {
+          existing.website = normalized;
+        }
       }
     } else {
+      // Change 2: normalize website on new buyer creation
+      const website = normalizeWebsite(nb.website || '');
       db.buyers.push({
         id: `buyer_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
         company_name: nb.company_name || 'Unknown',
         contact_name: nb.contact_name || '',
         email: nb.email || '',
         phone: nb.phone || '',
-        website: nb.website || '',
+        website,
         categories: [{ brand, item_type: itemType, notes: nb.evidence || '', minimum_threshold: 3 }],
         deal_history: [],
         status: 'active',
@@ -874,6 +900,69 @@ app.get('/api/outreach', (_, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ─── Change 3: Bulk contact lookup ───────────────────────────────────────────
+app.get('/api/buyers/lookup-contacts/status', (_, res) => {
+  try {
+    if (!fs.existsSync(FILES.lookup_job)) return res.json({ status: 'idle' });
+    res.json(readJSON(FILES.lookup_job, { status: 'idle' }));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/buyers/lookup-contacts', async (req, res) => {
+  try {
+    const db = readJSON(FILES.buyers, { buyers: [] });
+    const targets = db.buyers.filter(b => !b.email && !b.phone && b.status === 'active');
+    const job = { status: 'processing', total: targets.length, completed: 0, found: 0, results: [], started_at: new Date().toISOString() };
+    writeJSON(FILES.lookup_job, job);
+    console.log(`[CONTACT] Bulk lookup started — ${targets.length} buyers to check`);
+    res.status(202).json({ status: 'processing', total: targets.length });
+
+    (async () => {
+      try {
+        for (const buyer of targets) {
+          await new Promise(r => setTimeout(r, 1000));
+          let found = false;
+          try {
+            const contact = await lookupBuyerContact(buyer.company_name, buyer.website || '');
+            if (contact && (contact.email || contact.phone)) {
+              const freshDb = readJSON(FILES.buyers, { buyers: [] });
+              const rec = freshDb.buyers.find(b => b.id === buyer.id);
+              if (rec) {
+                if (contact.email) { rec.email = contact.email; console.log(`[CONTACT] Found email for ${buyer.company_name}: ${contact.email}`); }
+                if (contact.phone) { rec.phone = contact.phone; console.log(`[CONTACT] Found phone for ${buyer.company_name}: ${contact.phone}`); }
+                writeJSON(FILES.buyers, freshDb);
+              }
+              found = true;
+            } else {
+              console.log(`[CONTACT] No contact info found for ${buyer.company_name}`);
+            }
+          } catch (err) {
+            console.error(`[CONTACT] Error for ${buyer.company_name}:`, err.message);
+          }
+          const j = readJSON(FILES.lookup_job, job);
+          j.completed++;
+          if (found) j.found++;
+          j.results.push({ buyer_id: buyer.id, company_name: buyer.company_name, found, email: buyer.email || '', phone: buyer.phone || '' });
+          writeJSON(FILES.lookup_job, j);
+        }
+        const j = readJSON(FILES.lookup_job, job);
+        j.status = 'complete';
+        j.completed_at = new Date().toISOString();
+        writeJSON(FILES.lookup_job, j);
+        console.log(`[CONTACT] Bulk lookup complete — ${j.found} of ${j.total} found`);
+      } catch (err) {
+        console.error('[CONTACT] Bulk lookup crashed:', err.message);
+        try {
+          const j = readJSON(FILES.lookup_job, job);
+          j.status = 'complete';
+          j.error = err.message;
+          writeJSON(FILES.lookup_job, j);
+        } catch (_) {}
+      }
+    })();
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/settings', (_, res) => {
   try { res.json(readJSON(FILES.settings, { thresholds: [] })); }
   catch (err) { res.status(500).json({ error: err.message }); }
@@ -1083,8 +1172,23 @@ textarea{resize:vertical;min-height:80px}
       <option value="inactive">Inactive</option>
     </select>
     <button class="btn btn-outline" onclick="window.location='/api/buyers/export'">Export CSV</button>
+    <button class="btn btn-outline" onclick="startBulkContactLookup()" id="lookupContactsBtn">🔍 Find Missing Contacts</button>
     <button class="btn btn-green" onclick="openAddBuyer()">+ Add Buyer</button>
   </div>
+
+  <!-- Bulk contact lookup modal -->
+  <div id="lookupModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center">
+    <div style="background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:28px 32px;min-width:420px;max-width:560px;max-height:80vh;display:flex;flex-direction:column;gap:16px">
+      <div style="font-size:1.1rem;font-weight:700;color:#4DB748">🔍 Finding Missing Contacts</div>
+      <div id="lookupProgress" style="color:#aaa;font-size:.9rem">Starting...</div>
+      <div style="background:#111;border-radius:6px;height:8px;overflow:hidden">
+        <div id="lookupBar" style="height:100%;background:#4DB748;width:0%;transition:width .4s"></div>
+      </div>
+      <div id="lookupResults" style="overflow-y:auto;max-height:260px;font-size:.82rem;display:flex;flex-direction:column;gap:6px"></div>
+      <button class="btn btn-outline" id="lookupCloseBtn" style="display:none" onclick="closeLookupModal()">Close & Refresh</button>
+    </div>
+  </div>
+
   <div id="dbBulkBar" style="display:none;margin-bottom:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
     <span id="dbSelCount" class="count-badge">0 selected</span>
     <button class="btn btn-gold" onclick="createDraftsFromDb()">Contact Selected Buyers</button>
@@ -1502,6 +1606,76 @@ function updateDbBulkBar() {
 async function toggleBuyerStatus(id, current) {
   const newStatus = current === 'active' ? 'inactive' : 'active';
   await fetch('/api/buyers/' + id, { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ status: newStatus }) });
+  loadBuyerDb();
+}
+
+// ─── Bulk contact lookup ─────────────────────────────────────────────────────
+let lookupPollInterval = null;
+
+async function startBulkContactLookup() {
+  const modal = document.getElementById('lookupModal');
+  document.getElementById('lookupProgress').textContent = 'Starting...';
+  document.getElementById('lookupBar').style.width = '0%';
+  document.getElementById('lookupResults').innerHTML = '';
+  document.getElementById('lookupCloseBtn').style.display = 'none';
+  modal.style.display = 'flex';
+  document.getElementById('lookupContactsBtn').disabled = true;
+  try {
+    const r = await fetch('/api/buyers/lookup-contacts', { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Failed to start');
+    if (data.total === 0) {
+      document.getElementById('lookupProgress').textContent = 'No buyers with missing contacts found.';
+      document.getElementById('lookupCloseBtn').style.display = 'block';
+      return;
+    }
+    pollLookupStatus();
+  } catch (err) {
+    document.getElementById('lookupProgress').textContent = 'Error: ' + err.message;
+    document.getElementById('lookupCloseBtn').style.display = 'block';
+    document.getElementById('lookupContactsBtn').disabled = false;
+  }
+}
+
+function pollLookupStatus() {
+  if (lookupPollInterval) clearInterval(lookupPollInterval);
+  lookupPollInterval = setInterval(async () => {
+    try {
+      const r = await fetch('/api/buyers/lookup-contacts/status');
+      const job = await r.json();
+      const pct = job.total > 0 ? Math.round((job.completed / job.total) * 100) : 0;
+      document.getElementById('lookupBar').style.width = pct + '%';
+      document.getElementById('lookupProgress').textContent =
+        job.status === 'complete'
+          ? \`Done — found contact info for \${job.found} of \${job.total} buyers.\`
+          : \`Checking \${job.completed} of \${job.total}...\`;
+      const resultsEl = document.getElementById('lookupResults');
+      resultsEl.innerHTML = (job.results || []).map(r =>
+        \`<div style="display:flex;align-items:center;gap:8px">
+          <span>\${r.found ? '✅' : '❌'}</span>
+          <span style="color:#ddd">\${r.company_name}</span>
+          \${r.found ? '<span style="color:#aaa;font-size:.8rem">— contact found</span>' : ''}
+        </div>\`
+      ).join('');
+      if (job.status === 'complete') {
+        clearInterval(lookupPollInterval);
+        lookupPollInterval = null;
+        document.getElementById('lookupCloseBtn').style.display = 'block';
+        document.getElementById('lookupContactsBtn').disabled = false;
+      }
+    } catch (err) {
+      clearInterval(lookupPollInterval);
+      lookupPollInterval = null;
+      document.getElementById('lookupProgress').textContent = 'Poll error: ' + err.message;
+      document.getElementById('lookupCloseBtn').style.display = 'block';
+      document.getElementById('lookupContactsBtn').disabled = false;
+    }
+  }, 2000);
+}
+
+function closeLookupModal() {
+  if (lookupPollInterval) { clearInterval(lookupPollInterval); lookupPollInterval = null; }
+  document.getElementById('lookupModal').style.display = 'none';
   loadBuyerDb();
 }
 
