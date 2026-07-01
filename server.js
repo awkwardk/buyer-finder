@@ -120,15 +120,19 @@ async function callAnthropic(messages, system, tools, maxTokens = 4096) {
         'Content-Type': 'application/json',
         'x-api-key': apiKey,
         'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'web-search-2025-03-05',
         'Content-Length': Buffer.byteLength(data),
       },
     }, (res) => {
       let raw = '';
       res.on('data', c => raw += c);
       res.on('end', () => {
-        try { resolve(JSON.parse(raw)); }
-        catch (e) { reject(new Error('Invalid JSON from Anthropic')); }
+        console.log('[API] Status:', res.statusCode);
+        if (res.statusCode !== 200) console.log('[API] Error body:', raw.slice(0, 300));
+        try {
+          const parsed = JSON.parse(raw);
+          parsed._httpStatus = res.statusCode;
+          resolve(parsed);
+        } catch (e) { reject(new Error('Invalid JSON from Anthropic')); }
       });
     });
     req.on('error', reject);
@@ -248,46 +252,23 @@ async function runWebSearch(brand, itemType, model) {
     console.log(`[SEARCH] Angle ${i + 1}: ${angle}`);
 
     try {
-      const userMsg = `Search for companies that buy used ${brand} ${itemType}. Use this search query: "${angle}". Return results as a JSON array.`;
-      console.log(`[SEARCH] Angle ${i + 1} prompt →\n  system: ${system.slice(0, 120)}…\n  user: ${userMsg}`);
+      const userMsg = `Search for companies that buy used ${brand} ${itemType}. Use this search query: "${angle}". Return results as a JSON array of objects with fields: company_name, website, email, phone, evidence.`;
+      console.log(`[SEARCH] Angle ${i + 1} prompt — user: ${userMsg}`);
 
+      // web_search_20250305 is a server-side tool: one call, API executes the search internally,
+      // final response with text comes back directly — no client-side tool_use loop needed.
       const resp = await callAnthropic(
         [{ role: 'user', content: userMsg }],
         system,
-        [{ type: 'web_search', name: 'web_search' }],
+        [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
         2048
       );
 
-      console.log(`[SEARCH] Angle ${i + 1} initial response — stop_reason: ${resp.stop_reason}, content blocks: ${(resp.content || []).map(b => b.type).join(', ')}`);
+      console.log(`[SEARCH] Angle ${i + 1} response — stop_reason: ${resp.stop_reason}, http_status: ${resp._httpStatus || '?'}, blocks: ${(resp.content || []).map(b => b.type).join(', ')}`);
+      if (resp.error) console.log(`[SEARCH] Angle ${i + 1} API error: ${JSON.stringify(resp.error)}`);
 
-      // Handle tool use loop
-      let finalResp = resp;
-      let iterations = 0;
-      while (finalResp.stop_reason === 'tool_use' && iterations < 5) {
-        const toolResults = [];
-        for (const block of finalResp.content) {
-          if (block.type === 'tool_use') {
-            console.log(`[SEARCH] Angle ${i + 1} tool_use block — name: ${block.name}, input: ${JSON.stringify(block.input)}`);
-            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Search executed.' });
-          }
-        }
-        if (!toolResults.length) break;
-        finalResp = await callAnthropic(
-          [
-            { role: 'user', content: `Search for: "${angle}"` },
-            { role: 'assistant', content: finalResp.content },
-            { role: 'user', content: toolResults },
-          ],
-          system,
-          [{ type: 'web_search', name: 'web_search' }],
-          2048
-        );
-        console.log(`[SEARCH] Angle ${i + 1} follow-up response (iter ${iterations + 1}) — stop_reason: ${finalResp.stop_reason}, blocks: ${(finalResp.content || []).map(b => b.type).join(', ')}`);
-        iterations++;
-      }
-
-      const text = extractTextFromResponse(finalResp);
-      console.log(`[SEARCH] Angle ${i + 1} raw text from final response:\n---\n${text.slice(0, 800)}${text.length > 800 ? '\n…(truncated)' : ''}\n---`);
+      const text = extractTextFromResponse(resp);
+      console.log(`[SEARCH] Angle ${i + 1} raw text:\n---\n${text.slice(0, 800)}${text.length > 800 ? '\n…(truncated)' : ''}\n---`);
 
       const parsed = parseJSONSafe(text);
       console.log(`[SEARCH] Angle ${i + 1} parsed result — type: ${Array.isArray(parsed) ? 'array[' + parsed.length + ']' : typeof parsed}, value: ${JSON.stringify(parsed || null).slice(0, 300)}`);
