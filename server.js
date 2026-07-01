@@ -8,7 +8,6 @@ const sharp = require('sharp');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
-const http = require('http');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -49,7 +48,114 @@ function initDataFiles() {
   if (!fs.existsSync(FILES.settings)) writeJSON(FILES.settings, { thresholds: [], version: '1.0.0' });
 }
 
+// ─── Change 1: Seed Nova Biomedical buyers on startup ────────────────────────
+function seedNovaBiomedicalBuyers() {
+  const db = readJSON(FILES.buyers, { buyers: [] });
+  const today = new Date().toISOString();
+
+  // Step 1 — remove all existing Nova Biomedical buyers
+  const before = db.buyers.length;
+  db.buyers = db.buyers.filter(b =>
+    !(b.categories || []).some(c => c.brand.toLowerCase() === 'nova biomedical')
+  );
+  const removed = before - db.buyers.length;
+  console.log(`[SEED] Removed ${removed} existing Nova Biomedical buyers`);
+
+  // Step 2 — seed confirmed buyers if not already present by company_name
+  const seeds = [
+    {
+      id: 'buyer_seed_1',
+      company_name: 'Diamond Diagnostics',
+      website: 'https://diamonddiagnostics.com',
+      email: '',
+      phone: '',
+      contact_name: '',
+      categories: [{ brand: 'Nova Biomedical', item_type: 'blood gas analyzer', notes: 'One of the largest stocking distributors of blood gas analyzers globally. Explicitly purchases surplus and decommissioned Nova Biomedical equipment. Handles decontamination and removal.', minimum_threshold: 3 }],
+      deal_history: [],
+      status: 'active',
+      source: 'manual_research',
+      date_added: today,
+      last_contacted: null,
+      contact_count: 0,
+      tags: ['medical', 'lab equipment', 'blood gas'],
+    },
+    {
+      id: 'buyer_seed_2',
+      company_name: 'EquipNet',
+      website: 'https://equipnet.com',
+      email: '',
+      phone: '',
+      contact_name: '',
+      categories: [{ brand: 'Nova Biomedical', item_type: 'blood gas analyzer', notes: 'Global provider of preowned equipment. Explicitly lists Nova Biomedical as a brand they handle. Offers consignment and direct purchase. Contact via equipnet.com/sell-equipment', minimum_threshold: 3 }],
+      deal_history: [],
+      status: 'active',
+      source: 'manual_research',
+      date_added: today,
+      last_contacted: null,
+      contact_count: 0,
+      tags: ['medical', 'lab equipment', 'industrial'],
+    },
+    {
+      id: 'buyer_seed_3',
+      company_name: 'Arc Scientific',
+      website: 'https://arcscientific.com',
+      email: 'sales@arcscientific.com',
+      phone: '+1-857-237-5813',
+      contact_name: '',
+      categories: [{ brand: 'Nova Biomedical', item_type: 'blood gas analyzer', notes: 'Already has pHOx Ultra listings. Actively buys and sells used lab equipment globally. Known Nova Biomedical specialist.', minimum_threshold: 3 }],
+      deal_history: [],
+      status: 'active',
+      source: 'manual_research',
+      date_added: today,
+      last_contacted: null,
+      contact_count: 0,
+      tags: ['medical', 'lab equipment', 'blood gas'],
+    },
+    {
+      id: 'buyer_seed_4',
+      company_name: 'Surplus Solutions',
+      website: 'https://ssllc.com',
+      email: '',
+      phone: '',
+      contact_name: '',
+      categories: [{ brand: 'Nova Biomedical', item_type: 'blood gas analyzer', notes: 'Explicitly lists Nova Biomedical equipment. Buys surplus lab equipment directly. Has dedicated Nova Biomedical page on website.', minimum_threshold: 3 }],
+      deal_history: [],
+      status: 'active',
+      source: 'manual_research',
+      date_added: today,
+      last_contacted: null,
+      contact_count: 0,
+      tags: ['medical', 'lab equipment'],
+    },
+    {
+      id: 'buyer_seed_5',
+      company_name: 'Tekyard',
+      website: 'https://tekyard.com',
+      email: '',
+      phone: '',
+      contact_name: '',
+      categories: [{ brand: 'Nova Biomedical', item_type: 'blood gas analyzer', notes: 'Already has Nova Biomedical pHOx Ultra REF 42014 in inventory. Knows this model specifically and may want more units.', minimum_threshold: 3 }],
+      deal_history: [],
+      status: 'active',
+      source: 'manual_research',
+      date_added: today,
+      last_contacted: null,
+      contact_count: 0,
+      tags: ['medical', 'lab equipment', 'blood gas'],
+    },
+  ];
+
+  let added = 0;
+  for (const seed of seeds) {
+    const exists = db.buyers.some(b => b.company_name.toLowerCase() === seed.company_name.toLowerCase());
+    if (!exists) { db.buyers.push(seed); added++; }
+  }
+  writeJSON(FILES.buyers, db);
+  console.log(`[SEED] Added ${added} Nova Biomedical seed buyers`);
+}
+
 initDataFiles();
+seedNovaBiomedicalBuyers();
 
 // ─── Multer ──────────────────────────────────────────────────────────────────
 const upload = multer({
@@ -68,13 +174,8 @@ function makeOAuth2Client() {
   return new google.auth.OAuth2(GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REDIRECT_URI);
 }
 
-function loadTokens() {
-  return readJSON(FILES.tokens, null);
-}
-
-function saveTokens(tokens) {
-  writeJSON(FILES.tokens, tokens);
-}
+function loadTokens() { return readJSON(FILES.tokens, null); }
+function saveTokens(tokens) { writeJSON(FILES.tokens, tokens); }
 
 async function getAuthClient() {
   const tokens = loadTokens();
@@ -92,9 +193,7 @@ async function getAuthClient() {
       oauth2.setCredentials({ ...tokens, ...credentials });
     }
     return oauth2;
-  } catch (_) {
-    return null;
-  }
+  } catch (_) { return null; }
 }
 
 // ─── Anthropic helper ────────────────────────────────────────────────────────
@@ -102,12 +201,7 @@ async function callAnthropic(messages, system, tools, maxTokens = 4096) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
 
-  const body = {
-    model: 'claude-sonnet-4-6',
-    max_tokens: maxTokens,
-    system,
-    messages,
-  };
+  const body = { model: 'claude-sonnet-4-6', max_tokens: maxTokens, system, messages };
   if (tools && tools.length) body.tools = tools;
 
   return new Promise((resolve, reject) => {
@@ -143,32 +237,20 @@ async function callAnthropic(messages, system, tools, maxTokens = 4096) {
 
 function extractTextFromResponse(resp) {
   if (!resp || !resp.content) return '';
-  return resp.content
-    .filter(b => b.type === 'text')
-    .map(b => b.text)
-    .join('\n');
+  return resp.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
 }
 
 function parseJSONSafe(text) {
-  try {
-    // Try direct parse
-    return JSON.parse(text);
-  } catch (_) {}
-  // Try to extract JSON from markdown code blocks
+  try { return JSON.parse(text); } catch (_) {}
   const match = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (match) {
-    try { return JSON.parse(match[1].trim()); } catch (_) {}
-  }
-  // Try to find first [ or { and parse from there
+  if (match) { try { return JSON.parse(match[1].trim()); } catch (_) {} }
   const arrIdx = text.indexOf('[');
   const objIdx = text.indexOf('{');
   let idx = -1;
   if (arrIdx !== -1 && objIdx !== -1) idx = Math.min(arrIdx, objIdx);
   else if (arrIdx !== -1) idx = arrIdx;
   else if (objIdx !== -1) idx = objIdx;
-  if (idx !== -1) {
-    try { return JSON.parse(text.slice(idx)); } catch (_) {}
-  }
+  if (idx !== -1) { try { return JSON.parse(text.slice(idx)); } catch (_) {} }
   return null;
 }
 
@@ -199,7 +281,6 @@ function saveBuyersToDb(newBuyers, brand, itemType) {
       b.company_name.toLowerCase() === (nb.company_name || '').toLowerCase()
     );
     if (existing) {
-      // Add category if not already there
       const hasCat = (existing.categories || []).some(c =>
         c.brand.toLowerCase() === brand.toLowerCase() &&
         c.item_type.toLowerCase() === itemType.toLowerCase()
@@ -232,16 +313,61 @@ function saveBuyersToDb(newBuyers, brand, itemType) {
   return added;
 }
 
-async function runWebSearch(brand, itemType, model) {
+// ─── Change 4: Contact info lookup ──────────────────────────────────────────
+async function lookupBuyerContact(companyName, website) {
+  try {
+    const resp = await callAnthropic(
+      [{ role: 'user', content: `Find the contact email and phone number for ${companyName} at ${website}. Look for a buying/selling equipment contact email, general contact email, and phone number. Return JSON only: { email, phone, contact_page }. Use null for fields not found.` }],
+      `Find contact information for companies that buy used equipment. Search their website and any available sources.`,
+      [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }],
+      512
+    );
+    const text = extractTextFromResponse(resp);
+    const parsed = parseJSONSafe(text);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (err) {
+    console.error(`[CONTACT] Lookup error for ${companyName}:`, err.message);
+    return null;
+  }
+}
+
+// ─── Change 3: Improved web search prompt + Change 4 contact lookup ──────────
+async function runWebSearch(brand, itemType) {
   const angles = [
-    `we buy used ${brand} ${itemType}`,
-    `${brand} ${itemType} dealer reseller`,
-    `sell used ${brand} ${itemType} equipment`,
-    `${itemType} surplus dealer ${brand}`,
-    `${brand} authorized reseller used equipment`,
+    `"we buy" used ${brand} ${itemType} equipment`,
+    `sell used ${brand} ${itemType} surplus dealer`,
+    `${brand} ${itemType} refurbisher buyer cash offer`,
+    `${itemType} surplus equipment buyer ${brand} direct purchase`,
+    `${brand} equipment broker "sell your" used`,
   ];
 
-  const system = `You are researching companies that buy used specialty equipment. Search for companies that explicitly purchase or deal in used ${brand} ${itemType} equipment. For each company found return: company_name, website, email (if findable), phone (if findable), evidence they buy this brand/type specifically. Return ONLY a JSON array of company objects. Only include companies with clear evidence they buy this specific brand and type. Do not include general resellers with no brand/type specificity.`;
+  // Change 3: improved system prompt that finds actual buyers, not marketplaces
+  const system = `You are a researcher finding companies that PURCHASE used specialty equipment directly from sellers and resellers. You are finding BUYERS, not sellers.
+
+TARGET companies that:
+- Have a "We Buy" or "Sell Your Equipment" page
+- Advertise they purchase used/surplus equipment
+- Are surplus dealers that buy direct from businesses
+- Are refurbishers that acquire used equipment
+- Are equipment brokers that pay cash for equipment
+- Explicitly state they buy ${brand} ${itemType}
+
+DO NOT include any of these:
+- eBay listings or eBay sellers
+- DOTmed listings (unless the company itself buys equipment directly, not just lists on DOTmed)
+- LabX listings
+- Machinio listings
+- Biomedis listings
+- Any marketplace platform listing pages
+- Companies that ONLY sell equipment, not buy
+- Individual sellers listing single items
+
+For website field: use the company's OWN website, never a marketplace listing URL like dotmed.com, labx.com, machinio.com, ebay.com, or similar.
+
+For each qualifying buyer company return:
+{ company_name, website (must be company's own domain), email or null, phone or null, evidence (specific proof they BUY equipment — quote their "we buy" page or explicit purchase statement) }
+
+Return ONLY as a JSON array. If no qualifying buyers found for this search angle, return empty array []. Do not include any explanation text outside the JSON.`;
 
   const allBuyers = new Map();
   let consecutiveEmpty = 0;
@@ -252,11 +378,8 @@ async function runWebSearch(brand, itemType, model) {
     console.log(`[SEARCH] Angle ${i + 1}: ${angle}`);
 
     try {
-      const userMsg = `Search for companies that buy used ${brand} ${itemType}. Use this search query: "${angle}". Return results as a JSON array of objects with fields: company_name, website, email, phone, evidence.`;
-      console.log(`[SEARCH] Angle ${i + 1} prompt — user: ${userMsg}`);
+      const userMsg = `Search for companies that PURCHASE used ${brand} ${itemType} equipment. Search query: "${angle}". Return ONLY a JSON array of buyer companies with fields: company_name, website, email, phone, evidence.`;
 
-      // web_search_20250305 is a server-side tool: one call, API executes the search internally,
-      // final response with text comes back directly — no client-side tool_use loop needed.
       const resp = await callAnthropic(
         [{ role: 'user', content: userMsg }],
         system,
@@ -264,18 +387,18 @@ async function runWebSearch(brand, itemType, model) {
         2048
       );
 
-      console.log(`[SEARCH] Angle ${i + 1} response — stop_reason: ${resp.stop_reason}, http_status: ${resp._httpStatus || '?'}, blocks: ${(resp.content || []).map(b => b.type).join(', ')}`);
-      if (resp.error) console.log(`[SEARCH] Angle ${i + 1} API error: ${JSON.stringify(resp.error)}`);
+      console.log(`[SEARCH] Angle ${i + 1} — stop_reason: ${resp.stop_reason}, blocks: ${(resp.content || []).map(b => b.type).join(', ')}`);
+      if (resp.error) console.log(`[SEARCH] Angle ${i + 1} API error:`, JSON.stringify(resp.error));
 
       const text = extractTextFromResponse(resp);
-      console.log(`[SEARCH] Angle ${i + 1} raw text:\n---\n${text.slice(0, 800)}${text.length > 800 ? '\n…(truncated)' : ''}\n---`);
+      console.log(`[SEARCH] Angle ${i + 1} raw text:\n---\n${text.slice(0, 600)}${text.length > 600 ? '\n…(truncated)' : ''}\n---`);
 
       const parsed = parseJSONSafe(text);
-      console.log(`[SEARCH] Angle ${i + 1} parsed result — type: ${Array.isArray(parsed) ? 'array[' + parsed.length + ']' : typeof parsed}, value: ${JSON.stringify(parsed || null).slice(0, 300)}`);
+      console.log(`[SEARCH] Angle ${i + 1} parsed: ${Array.isArray(parsed) ? 'array[' + parsed.length + ']' : typeof parsed}`);
 
       const rawCompanies = Array.isArray(parsed) ? parsed : (parsed && parsed.companies ? parsed.companies : []);
 
-      // Normalize field names — AI may return "name" instead of "company_name"
+      // Normalize field names — AI may use "name" instead of "company_name"
       const companies = rawCompanies.map(c => ({
         company_name: c.company_name || c.name || c.company || '',
         website: c.website || c.url || c.site || '',
@@ -286,15 +409,11 @@ async function runWebSearch(brand, itemType, model) {
 
       if (companies.length > 0) {
         console.log(`[SEARCH] Angle ${i + 1} first company keys: ${Object.keys(rawCompanies[0]).join(', ')}`);
-        console.log(`[SEARCH] Angle ${i + 1} first company normalized: ${JSON.stringify(companies[0])}`);
       }
 
       let newThisAngle = 0;
       for (const c of companies) {
-        if (!c.company_name) {
-          console.log(`[SEARCH] Angle ${i + 1} skipping company with no name: ${JSON.stringify(c)}`);
-          continue;
-        }
+        if (!c.company_name) continue;
         const key = c.company_name.toLowerCase().trim();
         if (!allBuyers.has(key)) {
           allBuyers.set(key, c);
@@ -313,7 +432,7 @@ async function runWebSearch(brand, itemType, model) {
   }
 
   const results = Array.from(allBuyers.values());
-  console.log(`[SEARCH] Found ${results.length} buyers for ${brand} ${itemType}`);
+  console.log(`[SEARCH] Found ${results.length} total buyers for ${brand} ${itemType}`);
   return results;
 }
 
@@ -324,28 +443,23 @@ async function identifyItem(photoBuffers, brand, model, itemType) {
       type: 'image',
       source: { type: 'base64', media_type: 'image/jpeg', data: buf.toString('base64') },
     }));
-
     const resp = await callAnthropic(
       [{ role: 'user', content: [...images, { type: 'text', text: `Identify this equipment. User says brand: "${brand}", model: "${model}", type: "${itemType}". Return JSON: { brand, model, item_type, condition, description, what_included }` }] }],
       'You are an expert equipment appraiser. Identify the item with precision.',
-      null,
-      1024
+      null, 1024
     );
-
     const text = extractTextFromResponse(resp);
     return parseJSONSafe(text) || { brand, model, item_type: itemType };
-  } catch (_) {
-    return { brand, model, item_type: itemType };
-  }
+  } catch (_) { return { brand, model, item_type: itemType }; }
 }
 
 // ─── Gmail draft creation ────────────────────────────────────────────────────
 function makeEmailBody(buyer, opts) {
   const { brand, model, itemType, quantity, condition, notes } = opts;
-  return [
+  const lines = [
     `Hello ${buyer.company_name},`,
     '',
-    'My name is Kendall Gattison with Xtreme Electronic Recycling based in Clovis, CA. I came across your company while researching buyers for the equipment described below and wanted to reach out directly.',
+    `My name is Kendall Gattison with Xtreme Electronic Recycling based in Clovis, CA. I came across ${buyer.company_name} while researching buyers for the equipment described below and wanted to reach out directly.`,
     '',
     'EQUIPMENT AVAILABLE:',
     `Brand: ${brand}`,
@@ -353,25 +467,15 @@ function makeEmailBody(buyer, opts) {
     `Type: ${itemType}`,
     `Quantity: ${quantity}`,
     `Condition: ${condition}`,
-    '',
-    notes ? notes + '\n' : '',
-    'Please see the attached photos for visual reference. We are looking to move this equipment quickly and are open to reasonable offers.',
-    '',
-    'If this is something you purchase or can place, please reply to this email or reach me at:',
-    'Email: kendall@xtremeelectronicrecycling.com',
-    '',
-    'Thank you for your time.',
-    '',
-    'Kendall Gattison',
-    'Xtreme Electronic Recycling',
-    'Clovis, CA',
-  ].join('\n');
+  ];
+  if (notes) { lines.push(''); lines.push(notes); }
+  lines.push('', 'Please see the attached photos for visual reference. We are open to offers and looking to move this equipment promptly.', '', 'If this is something you purchase, please reply or reach me at:', 'Email: kendall@xtremeelectronicrecycling.com', '', 'Thank you for your time.', '', 'Kendall Gattison', 'Xtreme Electronic Recycling', 'Clovis, CA');
+  return lines.join('\n');
 }
 
 function buildMimeMessage(to, subject, body, attachments) {
   const boundary = `boundary_${Date.now()}`;
   const lines = [];
-
   lines.push(`To: ${to || ''}`);
   lines.push(`Subject: ${subject}`);
   lines.push('MIME-Version: 1.0');
@@ -382,7 +486,6 @@ function buildMimeMessage(to, subject, body, attachments) {
   lines.push('Content-Transfer-Encoding: quoted-printable');
   lines.push('');
   lines.push(body);
-
   for (const att of attachments) {
     lines.push(`--${boundary}`);
     lines.push(`Content-Type: ${att.mimeType}; name="${att.filename}"`);
@@ -391,29 +494,17 @@ function buildMimeMessage(to, subject, body, attachments) {
     lines.push('');
     lines.push(att.data.toString('base64').replace(/.{76}/g, '$&\n'));
   }
-
   lines.push(`--${boundary}--`);
   return Buffer.from(lines.join('\r\n')).toString('base64url');
 }
 
 async function createGmailDraft(auth, buyer, opts, photoBuffers) {
   const gmail = google.gmail({ version: 'v1', auth });
-  const subject = `${opts.brand} ${opts.model || opts.itemType} Available — ${opts.quantity} Unit${opts.quantity > 1 ? 's' : ''}`;
+  const subject = `${opts.brand} ${opts.model || opts.itemType} Available — ${opts.quantity} Unit${opts.quantity > 1 ? 's' : ''} | Xtreme Electronic Recycling`;
   const body = makeEmailBody(buyer, opts);
-
-  const attachments = photoBuffers.map((buf, i) => ({
-    filename: `photo_${i + 1}.jpg`,
-    mimeType: 'image/jpeg',
-    data: buf,
-  }));
-
+  const attachments = photoBuffers.map((buf, i) => ({ filename: `photo_${i + 1}.jpg`, mimeType: 'image/jpeg', data: buf }));
   const raw = buildMimeMessage(buyer.email || '', subject, body, attachments);
-
-  const res = await gmail.users.drafts.create({
-    userId: 'me',
-    requestBody: { message: { raw } },
-  });
-
+  const res = await gmail.users.drafts.create({ userId: 'me', requestBody: { message: { raw } } });
   return res.data.id;
 }
 
@@ -422,7 +513,6 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
-
 app.get('/ping', (_, res) => res.json({ ok: true }));
 
 // Gmail OAuth
@@ -453,9 +543,7 @@ app.get('/auth/status', async (_, res) => {
     const gmail = google.gmail({ version: 'v1', auth });
     const profile = await gmail.users.getProfile({ userId: 'me' });
     res.json({ connected: true, email: profile.data.emailAddress });
-  } catch (_) {
-    res.json({ connected: false });
-  }
+  } catch (_) { res.json({ connected: false }); }
 });
 
 app.get('/auth/disconnect', (_, res) => {
@@ -463,66 +551,131 @@ app.get('/auth/disconnect', (_, res) => {
   res.json({ ok: true });
 });
 
-// Search
+// ─── Change 2: Async background search ───────────────────────────────────────
 app.post('/api/search', upload.array('photos', 5), async (req, res) => {
   try {
     const { brand, item_type, model, quantity, condition, notes } = req.body;
     if (!brand || !item_type) return res.status(400).json({ error: 'brand and item_type required' });
 
+    const searchId = `search_${Date.now()}`;
     const photoBuffers = (req.files || []).map(f => f.buffer);
 
-    // AI identification (non-blocking if fails)
-    let identification = null;
-    if (photoBuffers.length > 0) {
-      const compressed = await Promise.all(
-        photoBuffers.map(buf => sharp(buf).resize(1024, 1024, { fit: 'inside' }).jpeg({ quality: 85 }).toBuffer())
-      );
-      identification = await identifyItem(compressed, brand, model, item_type);
-    }
-
-    // Check existing buyers
-    const threshold = getThreshold(brand, item_type);
-    const existing = getExistingBuyers(brand, item_type);
-
-    let buyers;
-    let fromCache = false;
-
-    if (existing.length >= threshold) {
-      console.log(`[SEARCH] Using ${existing.length} existing buyers for ${brand} ${item_type} — threshold met`);
-      buyers = existing;
-      fromCache = true;
-    } else {
-      console.log(`[SEARCH] Only ${existing.length} existing buyers (threshold ${threshold}) — running web search`);
-      const found = await runWebSearch(brand, item_type, model);
-      console.log(`[ROUTE] runWebSearch returned ${found.length} companies`);
-      if (found.length > 0) {
-        const added = saveBuyersToDb(found, brand, item_type);
-        console.log(`[ROUTE] saveBuyersToDb added ${added} new buyers to buyers.json`);
-      } else {
-        console.log(`[ROUTE] runWebSearch returned 0 companies — skipping save`);
-      }
-      buyers = getExistingBuyers(brand, item_type);
-      console.log(`[ROUTE] getExistingBuyers returned ${buyers.length} buyers for "${brand}" / "${item_type}"`);
-      fromCache = false;
-    }
-
-    // Save search record
+    // Save initial processing record and return 202 immediately
     const searches = readJSON(FILES.searches, { searches: [] });
-    const searchId = `search_${Date.now()}`;
-    searches.searches.push({
+    searches.searches.unshift({
       id: searchId,
       brand,
       item_type,
       model: model || '',
+      quantity: parseInt(quantity) || 1,
+      condition: condition || '',
+      notes: notes || '',
       search_date: new Date().toISOString(),
-      buyers_found: buyers.length,
-      search_complete: true,
+      status: 'processing',
+      buyers: [],
+      from_cache: false,
     });
     writeJSON(FILES.searches, searches);
 
-    res.json({ buyers, search_id: searchId, from_cache: fromCache, identification });
+    console.log(`[SEARCH] ${searchId} queued`);
+    res.status(202).json({ search_id: searchId, status: 'processing' });
+
+    // Run full pipeline in background
+    (async () => {
+      try {
+        // AI identification (non-blocking)
+        let identification = null;
+        if (photoBuffers.length > 0) {
+          try {
+            const compressed = await Promise.all(
+              photoBuffers.map(buf => sharp(buf).resize(1024, 1024, { fit: 'inside' }).jpeg({ quality: 85 }).toBuffer())
+            );
+            identification = await identifyItem(compressed, brand, model, item_type);
+          } catch (_) {}
+        }
+
+        const threshold = getThreshold(brand, item_type);
+        const existing = getExistingBuyers(brand, item_type);
+        let buyers;
+        let fromCache = false;
+
+        if (existing.length >= threshold) {
+          console.log(`[SEARCH] ${searchId} using ${existing.length} existing buyers — threshold met`);
+          buyers = existing;
+          fromCache = true;
+        } else {
+          console.log(`[SEARCH] ${searchId} only ${existing.length} existing (threshold ${threshold}) — running web search`);
+          const found = await runWebSearch(brand, item_type);
+          console.log(`[SEARCH] ${searchId} web search returned ${found.length} companies`);
+
+          if (found.length > 0) {
+            const added = saveBuyersToDb(found, brand, item_type);
+            console.log(`[SEARCH] ${searchId} saved ${added} new buyers to db`);
+
+            // Change 4: contact lookup for newly found buyers with no contact info
+            const db = readJSON(FILES.buyers, { buyers: [] });
+            for (const nb of found) {
+              if (!nb.email && !nb.phone && nb.website) {
+                await new Promise(r => setTimeout(r, 1000));
+                try {
+                  const contact = await lookupBuyerContact(nb.company_name, nb.website);
+                  if (contact && (contact.email || contact.phone)) {
+                    const rec = db.buyers.find(b => b.company_name.toLowerCase() === nb.company_name.toLowerCase());
+                    if (rec) {
+                      if (contact.email) { rec.email = contact.email; console.log(`[CONTACT] Found email for ${nb.company_name}: ${contact.email}`); }
+                      if (contact.phone) { rec.phone = contact.phone; console.log(`[CONTACT] Found phone for ${nb.company_name}: ${contact.phone}`); }
+                    }
+                  } else {
+                    console.log(`[CONTACT] No contact info found for ${nb.company_name}`);
+                  }
+                } catch (err) {
+                  console.error(`[CONTACT] Error for ${nb.company_name}:`, err.message);
+                }
+              }
+            }
+            writeJSON(FILES.buyers, db);
+          }
+          buyers = getExistingBuyers(brand, item_type);
+        }
+
+        // Update search record with results
+        const db2 = readJSON(FILES.searches, { searches: [] });
+        const rec = db2.searches.find(s => s.id === searchId);
+        if (rec) {
+          rec.status = 'complete';
+          rec.buyers = buyers;
+          rec.from_cache = fromCache;
+          rec.buyers_found = buyers.length;
+          rec.identification = identification;
+          rec.completed_at = new Date().toISOString();
+        }
+        writeJSON(FILES.searches, db2);
+        console.log(`[SEARCH] ${searchId} complete — ${buyers.length} buyers`);
+      } catch (err) {
+        console.error(`[SEARCH] ${searchId} failed:`, err.message);
+        try {
+          const db2 = readJSON(FILES.searches, { searches: [] });
+          const rec = db2.searches.find(s => s.id === searchId);
+          if (rec) { rec.status = 'failed'; rec.error = err.message; }
+          writeJSON(FILES.searches, db2);
+        } catch (_) {}
+      }
+    })();
+
   } catch (err) {
-    console.error('[SEARCH] Error:', err.message);
+    console.error('[SEARCH] Queue error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Poll endpoint for search status
+app.get('/api/search/:search_id', (req, res) => {
+  try {
+    const db = readJSON(FILES.searches, { searches: [] });
+    const rec = db.searches.find(s => s.id === req.params.search_id);
+    if (!rec) return res.status(404).json({ error: 'Search not found' });
+    res.json(rec);
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
@@ -537,9 +690,44 @@ app.get('/api/buyers', (req, res) => {
     if (brand) buyers = buyers.filter(b => (b.categories || []).some(c => c.brand.toLowerCase().includes(brand.toLowerCase())));
     if (item_type) buyers = buyers.filter(b => (b.categories || []).some(c => c.item_type.toLowerCase().includes(item_type.toLowerCase())));
     res.json({ buyers });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Change 6: CSV export
+app.get('/api/buyers/export', (req, res) => {
+  try {
+    const db = readJSON(FILES.buyers, { buyers: [] });
+    const buyers = db.buyers || [];
+    const today = new Date().toISOString().slice(0, 10);
+    const headers = ['First Name', 'Last Name', 'Company', 'Email', 'Phone', 'Website', 'Tags', 'Brand Categories', 'Notes', 'Date Added', 'Last Contacted', 'Deal Count', 'Status'];
+    const escCsv = v => {
+      const s = String(v || '');
+      return (s.includes(',') || s.includes('"') || s.includes('\n')) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const rows = buyers.map(b => {
+      const cats = (b.categories || []).map(c => `${c.brand} - ${c.item_type}`).join(' | ');
+      const notes = (b.categories || []).map(c => c.notes).filter(Boolean).slice(-1)[0] || '';
+      return [
+        '', // First Name
+        '', // Last Name
+        b.company_name,
+        b.email || '',
+        b.phone || '',
+        b.website || '',
+        (b.tags || []).join(', '),
+        cats,
+        notes,
+        (b.date_added || '').slice(0, 10),
+        (b.last_contacted || '').slice(0, 10),
+        (b.deal_history || []).length,
+        b.status || '',
+      ].map(escCsv).join(',');
+    });
+    const csv = [headers.join(','), ...rows].join('\n');
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="xrt-buyers-${today}.csv"`);
+    res.send(csv);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/buyers', (req, res) => {
@@ -564,9 +752,7 @@ app.post('/api/buyers', (req, res) => {
     db.buyers.push(buyer);
     writeJSON(FILES.buyers, db);
     res.json({ buyer });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.patch('/api/buyers/:id', (req, res) => {
@@ -577,9 +763,7 @@ app.patch('/api/buyers/:id', (req, res) => {
     db.buyers[idx] = { ...db.buyers[idx], ...req.body, id: req.params.id };
     writeJSON(FILES.buyers, db);
     res.json({ buyer: db.buyers[idx] });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/buyers/:id/deal', (req, res) => {
@@ -599,12 +783,10 @@ app.post('/api/buyers/:id/deal', (req, res) => {
     buyer.contact_count = (buyer.contact_count || 0) + 1;
     writeJSON(FILES.buyers, db);
     res.json({ buyer });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Outreach / Gmail drafts
+// Change 5: Outreach / bulk Gmail drafts
 app.post('/api/outreach', upload.array('photos', 5), async (req, res) => {
   try {
     const auth = await getAuthClient();
@@ -616,7 +798,6 @@ app.post('/api/outreach', upload.array('photos', 5), async (req, res) => {
     const db = readJSON(FILES.buyers, { buyers: [] });
     const photoBuffers = (req.files || []).map(f => f.buffer);
 
-    // Save photos to disk
     const outreachId = `outreach_${Date.now()}`;
     const photoDir = path.join(PHOTOS_DIR, outreachId);
     fs.mkdirSync(photoDir, { recursive: true });
@@ -628,28 +809,30 @@ app.post('/api/outreach', upload.array('photos', 5), async (req, res) => {
     }
 
     const opts = { brand, model: model || '', itemType: item_type, quantity: parseInt(quantity) || 1, condition: condition || '', notes: notes || '' };
-    const results = { success: [], failed: [] };
+    const perBuyerResults = [];
     const gmailDraftIds = [];
 
     for (const buyerId of ids) {
       const buyer = db.buyers.find(b => b.id === buyerId);
-      if (!buyer) { results.failed.push({ id: buyerId, error: 'Buyer not found' }); continue; }
-
+      if (!buyer) {
+        perBuyerResults.push({ buyer_id: buyerId, company_name: 'Unknown', success: false, error: 'Buyer not found' });
+        continue;
+      }
       try {
         const draftId = await createGmailDraft(auth, buyer, opts, photoBuffers);
         gmailDraftIds.push(draftId);
         buyer.last_contacted = new Date().toISOString();
         buyer.contact_count = (buyer.contact_count || 0) + 1;
-        results.success.push({ id: buyerId, company: buyer.company_name, draft_id: draftId });
+        perBuyerResults.push({ buyer_id: buyerId, company_name: buyer.company_name, success: true, draft_id: draftId });
+        console.log(`[DRAFT] Created for ${buyer.company_name}: ${draftId}`);
       } catch (err) {
         console.error(`[DRAFT] Failed for ${buyer.company_name}:`, err.message);
-        results.failed.push({ id: buyerId, company: buyer.company_name, error: err.message });
+        perBuyerResults.push({ buyer_id: buyerId, company_name: buyer.company_name, success: false, error: err.message });
       }
     }
 
     writeJSON(FILES.buyers, db);
 
-    // Save outreach record
     const outreachDb = readJSON(FILES.outreach, { outreach: [] });
     outreachDb.outreach.unshift({
       id: outreachId,
@@ -667,7 +850,16 @@ app.post('/api/outreach', upload.array('photos', 5), async (req, res) => {
     });
     writeJSON(FILES.outreach, outreachDb);
 
-    res.json({ outreach_id: outreachId, gmail_draft_ids: gmailDraftIds, success_count: results.success.length, results });
+    const succeeded = perBuyerResults.filter(r => r.success).length;
+    res.json({
+      success: true,
+      outreach_id: outreachId,
+      total: ids.length,
+      succeeded,
+      failed: ids.length - succeeded,
+      results: perBuyerResults,
+      gmail_draft_ids: gmailDraftIds,
+    });
   } catch (err) {
     console.error('[OUTREACH] Error:', err.message);
     res.status(500).json({ error: err.message });
@@ -675,14 +867,10 @@ app.post('/api/outreach', upload.array('photos', 5), async (req, res) => {
 });
 
 app.get('/api/outreach', (_, res) => {
-  try {
-    res.json(readJSON(FILES.outreach, { outreach: [] }));
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  try { res.json(readJSON(FILES.outreach, { outreach: [] })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Settings
 app.get('/api/settings', (_, res) => {
   try { res.json(readJSON(FILES.settings, { thresholds: [] })); }
   catch (err) { res.status(500).json({ error: err.message }); }
@@ -694,9 +882,7 @@ app.patch('/api/settings', (req, res) => {
     const updated = { ...current, ...req.body };
     writeJSON(FILES.settings, updated);
     res.json(updated);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ─── Main HTML page ──────────────────────────────────────────────────────────
@@ -715,8 +901,7 @@ app.get('/', (req, res) => {
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Montserrat',sans-serif;background:#121212;color:#e0e0e0;min-height:100vh}
 :root{--green:#4DB748;--gold:#FCB616;--dark:#1a1a1a;--card:#1e1e1e;--border:#2a2a2a;--input:#252525}
-a{color:var(--green);text-decoration:none}
-a:hover{text-decoration:underline}
+a{color:var(--green);text-decoration:none}a:hover{text-decoration:underline}
 .header{background:#000;border-bottom:2px solid var(--gold);padding:14px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 .header h1{font-size:1.4rem;font-weight:700;color:#fff;letter-spacing:1px}
 .header h1 span{color:var(--gold)}
@@ -726,11 +911,9 @@ a:hover{text-decoration:underline}
 .header-right{margin-left:auto;display:flex;gap:8px;align-items:center}
 .tabs{display:flex;background:#111;border-bottom:1px solid var(--border);overflow-x:auto}
 .tab{padding:14px 24px;cursor:pointer;font-size:.85rem;font-weight:600;color:#777;border-bottom:2px solid transparent;white-space:nowrap;transition:all .2s}
-.tab:hover{color:#ccc}
-.tab.active{color:var(--green);border-bottom-color:var(--green)}
+.tab:hover{color:#ccc}.tab.active{color:var(--green);border-bottom-color:var(--green)}
 .content{max-width:1100px;margin:0 auto;padding:24px 16px}
-.panel{display:none}
-.panel.active{display:block}
+.panel{display:none}.panel.active{display:block}
 .card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:20px;margin-bottom:16px}
 .card h3{font-size:1rem;font-weight:600;margin-bottom:14px;color:#fff}
 label{display:block;font-size:.8rem;color:#aaa;margin-bottom:5px;font-weight:500}
@@ -738,69 +921,56 @@ input,select,textarea{width:100%;background:var(--input);border:1px solid var(--
 input:focus,select:focus,textarea:focus{border-color:var(--green)}
 textarea{resize:vertical;min-height:80px}
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
-.form-row.three{grid-template-columns:1fr 1fr 1fr}
 .form-group{margin-bottom:14px}
 .btn{padding:10px 20px;border-radius:6px;border:none;cursor:pointer;font-family:inherit;font-size:.9rem;font-weight:600;transition:all .2s}
-.btn-green{background:var(--green);color:#000}
-.btn-green:hover{background:#5dcf57}
-.btn-gold{background:var(--gold);color:#000}
-.btn-gold:hover{background:#ffc53d}
-.btn-outline{background:transparent;border:1px solid var(--border);color:#ccc}
-.btn-outline:hover{border-color:#aaa;color:#fff}
-.btn-red{background:#c0392b;color:#fff}
-.btn-red:hover{background:#e74c3c}
+.btn-green{background:var(--green);color:#000}.btn-green:hover{background:#5dcf57}
+.btn-gold{background:var(--gold);color:#000}.btn-gold:hover{background:#ffc53d}
+.btn-outline{background:transparent;border:1px solid var(--border);color:#ccc}.btn-outline:hover{border-color:#aaa;color:#fff}
+.btn-red{background:#c0392b;color:#fff}.btn-red:hover{background:#e74c3c}
 .btn-full{width:100%;padding:14px}
 .btn:disabled{opacity:.5;cursor:not-allowed}
 .photo-upload{border:2px dashed var(--border);border-radius:8px;padding:24px;text-align:center;cursor:pointer;transition:border .2s}
-.photo-upload:hover{border-color:var(--green)}
-.photo-upload input{display:none}
+.photo-upload:hover{border-color:var(--green)}.photo-upload input{display:none}
 .thumbnails{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
 .thumbnail{width:80px;height:80px;object-fit:cover;border-radius:6px;border:1px solid var(--border)}
 .status-bar{background:#1a2a1a;border:1px solid var(--green);border-radius:6px;padding:12px 16px;margin-bottom:16px;font-size:.85rem;color:var(--green);display:none}
-.status-bar.show{display:block}
-.status-bar.error{background:#2a1a1a;border-color:#f44;color:#f44}
+.status-bar.show{display:block}.status-bar.error{background:#2a1a1a;border-color:#f44;color:#f44}
 .buyer-card{background:#161616;border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:10px}
 .buyer-card.selected{border-color:var(--green)}
 .buyer-header{display:flex;align-items:flex-start;gap:12px}
 .buyer-check{width:20px;height:20px;accent-color:var(--green);margin-top:2px;flex-shrink:0;cursor:pointer}
 .buyer-name{font-size:.95rem;font-weight:700;color:#fff}
-.buyer-meta{font-size:.78rem;color:#888;margin-top:3px}
-.buyer-meta a{color:var(--green)}
+.buyer-meta{font-size:.78rem;color:#888;margin-top:3px}.buyer-meta a{color:var(--green)}
 .tag{display:inline-block;background:#1e2e1e;color:var(--green);border:1px solid #2a4a2a;padding:2px 8px;border-radius:10px;font-size:.7rem;margin:2px}
 .tag.deal{background:#2a2a1a;color:var(--gold);border-color:#3a3a2a}
 .evidence{font-size:.78rem;color:#aaa;margin-top:6px;font-style:italic}
-.results-actions{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+.results-actions{display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}
 .count-badge{background:#1a2a1a;color:var(--green);padding:6px 14px;border-radius:20px;font-size:.82rem;font-weight:600}
-.search-bar{display:flex;gap:8px;margin-bottom:16px}
-.search-bar input{flex:1}
-table{width:100%;border-collapse:collapse;font-size:.85rem}
-th{text-align:left;padding:10px 12px;color:#777;border-bottom:1px solid var(--border);font-weight:600;font-size:.78rem}
-td{padding:10px 12px;border-bottom:1px solid #1a1a1a;vertical-align:top}
-tr:hover td{background:#1a1a1a}
 .pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.7rem;font-weight:600}
-.pill.active{background:#1a3a1a;color:var(--green)}
-.pill.inactive{background:#2a2a2a;color:#777}
+.pill.active{background:#1a3a1a;color:var(--green)}.pill.inactive{background:#2a2a2a;color:#777}
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:1000;display:none;align-items:center;justify-content:center}
 .modal-overlay.show{display:flex}
-.modal{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:24px;width:90%;max-width:480px;max-height:90vh;overflow-y:auto}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:24px;width:90%;max-width:520px;max-height:90vh;overflow-y:auto}
 .modal h3{margin-bottom:16px;font-size:1rem;color:#fff}
 .modal-actions{display:flex;gap:10px;margin-top:20px;justify-content:flex-end}
 .outreach-card{background:#161616;border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:10px}
 .outreach-card h4{font-size:.95rem;font-weight:700;color:#fff}
 .outreach-meta{font-size:.78rem;color:#888;margin-top:4px}
 .step-label{font-size:.75rem;font-weight:700;color:var(--gold);letter-spacing:.5px;margin-bottom:8px;text-transform:uppercase}
-.divider{border:none;border-top:1px solid var(--border);margin:20px 0}
-.loader{display:inline-block;width:16px;height:16px;border:2px solid #333;border-top-color:var(--green);border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:8px}
+.loader{display:inline-block;width:16px;height:16px;border:2px solid #333;border-top-color:var(--green);border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:6px}
 @keyframes spin{to{transform:rotate(360deg)}}
-.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-@media(max-width:600px){.form-row,.form-row.three,.grid-2{grid-template-columns:1fr}}
+.progress-item{padding:8px 0;border-bottom:1px solid var(--border);font-size:.85rem;display:flex;align-items:center;gap:8px}
+.progress-item:last-child{border-bottom:none}
+.pi-ok{color:var(--green)}.pi-fail{color:#f66}.pi-pending{color:#aaa}
 .settings-table td:first-child{font-weight:600;color:#ccc}
 .inline-edit{background:var(--input);border:1px solid var(--border);border-radius:4px;padding:4px 8px;width:60px;color:#e0e0e0;font-family:inherit;text-align:center}
 .flash{padding:12px 16px;border-radius:6px;margin-bottom:16px;font-size:.85rem;font-weight:500}
 .flash.success{background:#1a3a1a;border:1px solid var(--green);color:var(--green)}
 .flash.error{background:#3a1a1a;border:1px solid #f44;color:#f44}
 .empty-state{text-align:center;padding:40px 20px;color:#555}
-.empty-state svg{width:48px;height:48px;margin-bottom:12px;opacity:.4}
+.search-spinner{text-align:center;padding:32px 0;color:#aaa;font-size:.9rem}
+.search-spinner .big-loader{width:36px;height:36px;border-width:3px;margin:0 auto 12px;display:block}
+@media(max-width:600px){.form-row{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -813,19 +983,18 @@ tr:hover td{background:#1a1a1a}
   </div>
 </div>
 
-<div id="flashBar" style="display:none" class="content" style="padding-bottom:0"></div>
+<div id="flashBar" style="display:none;padding:0 16px"></div>
 
 <div class="tabs">
-  <div class="tab active" onclick="showTab('search')">New Search</div>
-  <div class="tab" onclick="showTab('buyers')">Buyer Database</div>
-  <div class="tab" onclick="showTab('outreach')">Outreach History</div>
-  <div class="tab" onclick="showTab('settings')">Settings</div>
+  <div class="tab active" onclick="showTab('search',this)">New Search</div>
+  <div class="tab" onclick="showTab('buyers',this)">Buyer Database</div>
+  <div class="tab" onclick="showTab('outreach',this)">Outreach History</div>
+  <div class="tab" onclick="showTab('settings',this)">Settings</div>
 </div>
 
-<!-- ─── TAB 1: New Search ─────────────────────────────────────────── -->
+<!-- ─── TAB 1: New Search ──────────────────────────────────────────────────── -->
 <div id="tab-search" class="panel active">
 <div class="content">
-
   <div id="searchStatus" class="status-bar"></div>
 
   <div class="card">
@@ -876,52 +1045,61 @@ tr:hover td{background:#1a1a1a}
     <div id="thumbnails" class="thumbnails"></div>
   </div>
 
-  <button class="btn btn-green btn-full" onclick="runSearch()">
-    Find Buyers →
-  </button>
+  <button id="findBtn" class="btn btn-green btn-full" onclick="runSearch()">Find Buyers →</button>
+
+  <div id="searchingPanel" style="display:none;margin-top:20px">
+    <div class="search-spinner">
+      <span class="loader big-loader"></span>
+      <div id="searchMsg">Checking buyer database...</div>
+    </div>
+  </div>
 
   <div id="resultsPanel" style="display:none;margin-top:20px">
     <div class="results-actions">
       <span id="buyerCount" class="count-badge">0 buyers found</span>
-      <button class="btn btn-outline" onclick="selectAll()">Select All</button>
-      <button class="btn btn-outline" onclick="selectNone()">Select None</button>
+      <label style="display:flex;align-items:center;gap:6px;font-size:.82rem;color:#aaa;cursor:pointer;margin:0">
+        <input type="checkbox" id="selectAllChk" onchange="selectAllToggle(this)" style="width:auto;accent-color:var(--green)"> Select All
+      </label>
       <button id="draftBtn" class="btn btn-gold" onclick="createDrafts()" style="margin-left:auto" disabled>
         Create Gmail Drafts for Selected
       </button>
     </div>
     <div id="buyerList"></div>
   </div>
-
 </div>
 </div>
 
-<!-- ─── TAB 2: Buyer Database ─────────────────────────────────────── -->
+<!-- ─── TAB 2: Buyer Database ──────────────────────────────────────────────── -->
 <div id="tab-buyers" class="panel">
 <div class="content">
-  <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap">
+  <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
     <input id="db-search" type="text" placeholder="Search by company, brand, item type…" style="flex:1;min-width:200px" oninput="loadBuyerDb()">
     <select id="db-status" onchange="loadBuyerDb()" style="width:150px">
       <option value="all">All Statuses</option>
       <option value="active">Active</option>
       <option value="inactive">Inactive</option>
     </select>
+    <button class="btn btn-outline" onclick="window.location='/api/buyers/export'">Export CSV</button>
     <button class="btn btn-green" onclick="openAddBuyer()">+ Add Buyer</button>
+  </div>
+  <div id="dbBulkBar" style="display:none;margin-bottom:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <span id="dbSelCount" class="count-badge">0 selected</span>
+    <button class="btn btn-gold" onclick="createDraftsFromDb()">Contact Selected Buyers</button>
   </div>
   <div id="buyerDbList"></div>
 </div>
 </div>
 
-<!-- ─── TAB 3: Outreach History ───────────────────────────────────── -->
+<!-- ─── TAB 3: Outreach History ─────────────────────────────────────────────── -->
 <div id="tab-outreach" class="panel">
 <div class="content">
   <div id="outreachList"></div>
 </div>
 </div>
 
-<!-- ─── TAB 4: Settings ──────────────────────────────────────────── -->
+<!-- ─── TAB 4: Settings ─────────────────────────────────────────────────────── -->
 <div id="tab-settings" class="panel">
 <div class="content">
-
   <div class="card">
     <h3>Gmail Connection</h3>
     <div id="gmailSettingsStatus" style="margin-bottom:14px;font-size:.85rem;color:#aaa">Checking…</div>
@@ -930,27 +1108,24 @@ tr:hover td{background:#1a1a1a}
       <button class="btn btn-outline" onclick="disconnectGmail()">Disconnect</button>
     </div>
   </div>
-
   <div class="card">
     <h3>Category Thresholds</h3>
     <p style="font-size:.82rem;color:#777;margin-bottom:14px">Minimum buyers required before skipping online search. Default: 3.</p>
     <div id="thresholdsTable"></div>
     <button class="btn btn-green" style="margin-top:14px" onclick="saveThresholds()">Save Thresholds</button>
   </div>
-
   <div class="card">
     <h3>About</h3>
     <table class="settings-table">
-      <tr><td>Version</td><td>1.0.0</td></tr>
+      <tr><td>Version</td><td>1.1.0</td></tr>
       <tr><td>Data Directory</td><td>${DATA_DIR.replace(/\\/g, '/')}</td></tr>
       <tr><td>Storage</td><td>Persistent disk at /data/buyer-finder/</td></tr>
     </table>
   </div>
-
 </div>
 </div>
 
-<!-- ─── Modals ─────────────────────────────────────────────────────── -->
+<!-- ─── Modals ──────────────────────────────────────────────────────────────── -->
 <div id="modalOverlay" class="modal-overlay" onclick="if(event.target===this)closeModal()">
   <div class="modal" id="modalContent"></div>
 </div>
@@ -960,27 +1135,29 @@ tr:hover td{background:#1a1a1a}
 let selectedPhotos = [];
 let searchResults = [];
 let currentSearchMeta = {};
+let pollTimer = null;
+let dbSelectedIds = new Set();
 
 // ── Tab switching ──────────────────────────────────────────────────────────
-function showTab(name) {
+function showTab(name, el) {
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
-  event.currentTarget.classList.add('active');
+  if (el) el.classList.add('active');
   if (name === 'buyers') loadBuyerDb();
   if (name === 'outreach') loadOutreach();
   if (name === 'settings') loadSettings();
 }
 
-// ── Flash messages ─────────────────────────────────────────────────────────
+// ── Flash ──────────────────────────────────────────────────────────────────
 function flash(msg, type='success') {
   const bar = document.getElementById('flashBar');
   bar.innerHTML = '<div class="flash ' + type + '">' + msg + '</div>';
   bar.style.display = 'block';
-  setTimeout(() => { bar.style.display = 'none'; }, 5000);
+  setTimeout(() => { bar.style.display = 'none'; }, 6000);
 }
 
-// ── Gmail status ───────────────────────────────────────────────────────────
+// ── Gmail ──────────────────────────────────────────────────────────────────
 async function checkGmailStatus() {
   try {
     const r = await fetch('/auth/status').then(r => r.json());
@@ -1017,11 +1194,34 @@ function handlePhotos(input) {
   });
 }
 
-// ── Search ─────────────────────────────────────────────────────────────────
+// ── Search (Change 2: async polling) ──────────────────────────────────────
 function setStatus(msg, isError) {
   const el = document.getElementById('searchStatus');
   el.textContent = msg;
   el.className = 'status-bar show' + (isError ? ' error' : '');
+}
+
+const STATUS_MSGS = [
+  'Checking buyer database...',
+  'Searching online for buyers...',
+  'Analyzing results...',
+  'Searching online for buyers...',
+  'Compiling buyer list...',
+];
+let msgIdx = 0;
+let msgTimer = null;
+
+function startStatusCycle() {
+  msgIdx = 0;
+  document.getElementById('searchMsg').textContent = STATUS_MSGS[0];
+  msgTimer = setInterval(() => {
+    msgIdx = (msgIdx + 1) % STATUS_MSGS.length;
+    document.getElementById('searchMsg').textContent = STATUS_MSGS[msgIdx];
+  }, 4000);
+}
+
+function stopStatusCycle() {
+  if (msgTimer) { clearInterval(msgTimer); msgTimer = null; }
 }
 
 async function runSearch() {
@@ -1034,9 +1234,15 @@ async function runSearch() {
 
   if (!brand || !itemType) { flash('Brand and Item Type are required.', 'error'); return; }
 
-  setStatus('Checking buyer database…');
-  document.querySelector('[onclick="runSearch()"]').disabled = true;
+  currentSearchMeta = { brand, model, itemType, quantity: qty, condition, notes };
+
+  document.getElementById('findBtn').disabled = true;
   document.getElementById('resultsPanel').style.display = 'none';
+  document.getElementById('searchingPanel').style.display = 'block';
+  document.getElementById('searchStatus').className = 'status-bar';
+  startStatusCycle();
+
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 
   try {
     const fd = new FormData();
@@ -1048,57 +1254,75 @@ async function runSearch() {
     fd.append('notes', notes);
     selectedPhotos.forEach(f => fd.append('photos', f));
 
-    setStatus('Searching for buyers (this may take 30-60 seconds for a new search)…');
-
     const r = await fetch('/api/search', { method: 'POST', body: fd }).then(r => r.json());
+    if (r.error) throw new Error(r.error);
 
-    if (r.error) { setStatus(r.error, true); return; }
-
-    searchResults = r.buyers || [];
-    currentSearchMeta = { brand, model, itemType: itemType, quantity: qty, condition, notes };
-
-    const fromCache = r.from_cache ? ' (from database)' : ' (from web search)';
-    setStatus('Found ' + searchResults.length + ' buyers' + fromCache);
-
-    renderBuyerResults(searchResults);
-    document.getElementById('resultsPanel').style.display = 'block';
+    const searchId = r.search_id;
+    pollTimer = setInterval(() => pollSearch(searchId), 3000);
   } catch(err) {
+    stopStatusCycle();
+    document.getElementById('searchingPanel').style.display = 'none';
+    document.getElementById('findBtn').disabled = false;
     setStatus('Search failed: ' + err.message, true);
-  } finally {
-    document.querySelector('[onclick="runSearch()"]').disabled = false;
   }
 }
 
+async function pollSearch(searchId) {
+  try {
+    const r = await fetch('/api/search/' + searchId).then(r => r.json());
+    if (r.status === 'complete') {
+      clearInterval(pollTimer); pollTimer = null;
+      stopStatusCycle();
+      document.getElementById('searchingPanel').style.display = 'none';
+      document.getElementById('findBtn').disabled = false;
+      searchResults = r.buyers || [];
+      const fromCache = r.from_cache ? ' (from database)' : ' (from web search)';
+      setStatus('Found ' + searchResults.length + ' buyer' + (searchResults.length !== 1 ? 's' : '') + fromCache);
+      renderBuyerResults(searchResults);
+      document.getElementById('resultsPanel').style.display = 'block';
+    } else if (r.status === 'failed') {
+      clearInterval(pollTimer); pollTimer = null;
+      stopStatusCycle();
+      document.getElementById('searchingPanel').style.display = 'none';
+      document.getElementById('findBtn').disabled = false;
+      setStatus('Search failed: ' + (r.error || 'Unknown error'), true);
+    }
+  } catch(_) {}
+}
+
+// ── Render search results (Change 5: checkboxes) ───────────────────────────
 function renderBuyerResults(buyers) {
   const list = document.getElementById('buyerList');
   document.getElementById('buyerCount').textContent = buyers.length + ' buyer' + (buyers.length !== 1 ? 's' : '') + ' found';
+  document.getElementById('selectAllChk').checked = false;
 
   if (!buyers.length) {
     list.innerHTML = '<div class="empty-state"><div style="font-size:2rem">🔍</div><div style="margin-top:8px;color:#666">No buyers found. Try different search terms.</div></div>';
+    updateDraftBtn();
     return;
   }
 
   list.innerHTML = buyers.map((b, i) => {
     const deals = (b.deal_history || []).filter(d => d.outcome === 'completed').length;
     const cats = (b.categories || []).map(c => '<span class="tag">' + esc(c.brand) + ' · ' + esc(c.item_type) + '</span>').join('');
+    const evidence = (b.categories || []).map(c => c.notes).filter(Boolean)[0] || '';
     return \`<div class="buyer-card" id="bcard_\${i}">
       <div class="buyer-header">
         <input type="checkbox" class="buyer-check" data-idx="\${i}" onchange="toggleBuyer(this)">
         <div style="flex:1">
           <div class="buyer-name">\${esc(b.company_name)}</div>
           <div class="buyer-meta">
-            \${b.website ? '<a href="' + esc(b.website) + '" target="_blank">' + esc(b.website) + '</a> · ' : ''}
-            \${b.email ? esc(b.email) + ' · ' : ''}
-            \${b.phone ? esc(b.phone) : ''}
+            \${b.website ? '<a href="' + esc(b.website) + '" target="_blank">' + esc(b.website) + '</a>' : ''}
+            \${b.email ? ' · ' + esc(b.email) : ''}
+            \${b.phone ? ' · ' + esc(b.phone) : ''}
           </div>
           <div style="margin-top:6px">\${cats}</div>
-          \${deals ? '<span class="tag deal">✓ ' + deals + ' deal' + (deals !== 1 ? 's' : '') + ' completed</span>' : ''}
-          \${b.categories && b.categories[0] && b.categories[0].notes ? '<div class="evidence">' + esc(b.categories[0].notes) + '</div>' : ''}
+          \${deals ? '<span class="tag deal">✓ ' + deals + ' deal' + (deals !== 1 ? 's' : '') + '</span>' : ''}
+          \${evidence ? '<div class="evidence">' + esc(evidence) + '</div>' : ''}
         </div>
       </div>
     </div>\`;
   }).join('');
-
   updateDraftBtn();
 }
 
@@ -1108,31 +1332,50 @@ function toggleBuyer(cb) {
   updateDraftBtn();
 }
 
-function selectAll() {
-  document.querySelectorAll('.buyer-check').forEach(cb => { cb.checked = true; cb.dispatchEvent(new Event('change')); });
-}
-
-function selectNone() {
-  document.querySelectorAll('.buyer-check').forEach(cb => { cb.checked = false; cb.dispatchEvent(new Event('change')); });
+function selectAllToggle(masterCb) {
+  document.querySelectorAll('.buyer-check').forEach(cb => {
+    cb.checked = masterCb.checked;
+    const i = cb.dataset.idx;
+    document.getElementById('bcard_' + i).classList.toggle('selected', cb.checked);
+  });
+  updateDraftBtn();
 }
 
 function updateDraftBtn() {
   const n = document.querySelectorAll('.buyer-check:checked').length;
   const btn = document.getElementById('draftBtn');
   btn.disabled = n === 0;
-  btn.textContent = n ? 'Create ' + n + ' Gmail Draft' + (n !== 1 ? 's' : '') : 'Create Gmail Drafts for Selected';
+  btn.textContent = n ? 'Create Personalized Gmail Drafts (' + n + ')' : 'Create Gmail Drafts for Selected';
 }
 
+// ── Bulk draft creation with progress modal (Change 5) ─────────────────────
 async function createDrafts() {
   const checked = Array.from(document.querySelectorAll('.buyer-check:checked'));
   if (!checked.length) return;
-
   const buyerIds = checked.map(cb => searchResults[parseInt(cb.dataset.idx)].id).filter(Boolean);
-  const { brand, model, itemType, quantity, condition, notes } = currentSearchMeta;
+  await runBulkDrafts(buyerIds, selectedPhotos);
+}
 
-  const btn = document.getElementById('draftBtn');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="loader"></span>Creating drafts…';
+async function createDraftsFromDb() {
+  if (!dbSelectedIds.size) return;
+  await runBulkDrafts(Array.from(dbSelectedIds), []);
+}
+
+async function runBulkDrafts(buyerIds, photos) {
+  const { brand, model, itemType, quantity, condition, notes } = currentSearchMeta;
+  const total = buyerIds.length;
+
+  // Show progress modal
+  document.getElementById('modalContent').innerHTML = \`
+    <h3>Creating Gmail Drafts</h3>
+    <div id="progressList" style="margin:16px 0;max-height:300px;overflow-y:auto"></div>
+    <div id="progressSummary" style="font-size:.85rem;color:#aaa;margin-top:8px"></div>
+    <div class="modal-actions" id="progressActions" style="display:none">
+      <a href="https://mail.google.com/mail/u/0/#drafts" target="_blank" class="btn btn-green">Open Gmail Drafts →</a>
+      <button class="btn btn-outline" onclick="closeModal()">Close</button>
+    </div>
+  \`;
+  openModal();
 
   const fd = new FormData();
   fd.append('buyer_ids', JSON.stringify(buyerIds));
@@ -1142,27 +1385,53 @@ async function createDrafts() {
   fd.append('quantity', quantity || 1);
   fd.append('condition', condition || '');
   fd.append('notes', notes || '');
-  selectedPhotos.forEach(f => fd.append('photos', f));
+  photos.forEach(f => fd.append('photos', f));
+
+  // Show pending items
+  const pList = document.getElementById('progressList');
+
+  // Load buyer names for display
+  const db = await fetch('/api/buyers').then(r => r.json());
+  const buyerMap = {};
+  (db.buyers || []).forEach(b => { buyerMap[b.id] = b.company_name; });
+
+  pList.innerHTML = buyerIds.map((id, i) =>
+    \`<div class="progress-item" id="pi_\${i}">
+      <span class="loader"></span>
+      <span class="pi-pending">Creating draft \${i + 1} of \${total} — \${esc(buyerMap[id] || id)}...</span>
+    </div>\`
+  ).join('');
 
   try {
     const r = await fetch('/api/outreach', { method: 'POST', body: fd }).then(r => r.json());
-    if (r.error) { flash(r.error, 'error'); return; }
-    flash('Created ' + r.success_count + ' Gmail draft' + (r.success_count !== 1 ? 's' : '') + '! <a href="https://mail.google.com/mail/u/0/#drafts" target="_blank">Open Gmail Drafts →</a>');
-    const failed = r.results && r.results.failed || [];
-    if (failed.length) flash(failed.length + ' draft(s) failed: ' + failed.map(f => f.company || f.id).join(', '), 'error');
+    if (r.error) throw new Error(r.error);
+
+    // Update progress items with results
+    (r.results || []).forEach((res, i) => {
+      const el = document.getElementById('pi_' + i);
+      if (!el) return;
+      if (res.success) {
+        el.innerHTML = '<span class="pi-ok">✓</span> <span class="pi-ok">Draft created — ' + esc(res.company_name) + '</span>';
+      } else {
+        el.innerHTML = '<span class="pi-fail">✗</span> <span class="pi-fail">Failed — ' + esc(res.company_name) + ': ' + esc(res.error || 'unknown error') + '</span>';
+      }
+    });
+
+    document.getElementById('progressSummary').textContent = 'Complete: ' + r.succeeded + ' of ' + r.total + ' drafts created.';
+    document.getElementById('progressActions').style.display = 'flex';
   } catch(err) {
-    flash('Draft creation failed: ' + err.message, 'error');
-  } finally {
-    updateDraftBtn();
+    pList.innerHTML = '<div style="color:#f66">Error: ' + esc(err.message) + '</div>';
+    document.getElementById('progressActions').style.display = 'flex';
   }
 }
 
 // ── Buyer Database ─────────────────────────────────────────────────────────
 async function loadBuyerDb() {
+  dbSelectedIds.clear();
+  updateDbBulkBar();
   const q = document.getElementById('db-search').value.trim();
   const status = document.getElementById('db-status').value;
-  const params = new URLSearchParams({ status });
-  const r = await fetch('/api/buyers?' + params).then(r => r.json());
+  const r = await fetch('/api/buyers?' + new URLSearchParams({ status })).then(r => r.json());
   let buyers = r.buyers || [];
 
   if (q) {
@@ -1183,32 +1452,48 @@ async function loadBuyerDb() {
   el.innerHTML = buyers.map(b => {
     const deals = (b.deal_history || []).length;
     const cats = (b.categories || []).map(c => '<span class="tag">' + esc(c.brand) + ' · ' + esc(c.item_type) + '</span>').join('');
-    return \`<div class="buyer-card">
+    return \`<div class="buyer-card" id="dbcard_\${b.id}">
       <div style="display:flex;align-items:flex-start;gap:12px">
+        <input type="checkbox" class="buyer-check db-check" data-id="\${b.id}" onchange="toggleDbBuyer(this)" style="margin-top:4px;width:18px;height:18px;accent-color:var(--green);flex-shrink:0;cursor:pointer">
         <div style="flex:1">
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
             <div class="buyer-name">\${esc(b.company_name)}</div>
             <span class="pill \${b.status === 'active' ? 'active' : 'inactive'}">\${b.status}</span>
-            \${deals ? '<span class="tag deal">\${deals} deal\${deals !== 1 ? "s" : ""}</span>' : ''}
+            \${deals ? '<span class="tag deal">' + deals + ' deal' + (deals !== 1 ? 's' : '') + '</span>' : ''}
           </div>
           <div class="buyer-meta" style="margin-top:4px">
-            \${b.email ? esc(b.email) + ' · ' : ''}
-            \${b.phone ? esc(b.phone) + ' · ' : ''}
-            \${b.website ? '<a href="' + esc(b.website) + '" target="_blank">' + esc(b.website) + '</a>' : ''}
+            \${b.email ? esc(b.email) : ''}
+            \${b.phone ? (b.email ? ' · ' : '') + esc(b.phone) : ''}
+            \${b.website ? ' · <a href="' + esc(b.website) + '" target="_blank">' + esc(b.website) + '</a>' : ''}
           </div>
           <div style="margin-top:8px">\${cats}</div>
           \${b.last_contacted ? '<div style="font-size:.75rem;color:#666;margin-top:6px">Last contacted: ' + b.last_contacted.slice(0,10) + '</div>' : ''}
         </div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <div style="display:flex;gap:6px;flex-wrap:wrap;flex-shrink:0">
           <button class="btn btn-outline" style="padding:5px 10px;font-size:.75rem" onclick='openEditBuyer(\${JSON.stringify(b).replace(/'/g,"&apos;")})'>Edit</button>
           <button class="btn btn-gold" style="padding:5px 10px;font-size:.75rem" onclick='openDealModal("\${b.id}")'>Mark Deal</button>
-          <button class="btn \${b.status === "active" ? "btn-red" : "btn-green"}" style="padding:5px 10px;font-size:.75rem" onclick='toggleBuyerStatus("\${b.id}", "\${b.status}")'>
+          <button class="btn \${b.status === 'active' ? 'btn-red' : 'btn-green'}" style="padding:5px 10px;font-size:.75rem" onclick='toggleBuyerStatus("\${b.id}","\${b.status}")'>
             \${b.status === 'active' ? 'Deactivate' : 'Activate'}
           </button>
         </div>
       </div>
     </div>\`;
   }).join('');
+}
+
+function toggleDbBuyer(cb) {
+  const id = cb.dataset.id;
+  if (cb.checked) dbSelectedIds.add(id);
+  else dbSelectedIds.delete(id);
+  document.getElementById('dbcard_' + id).classList.toggle('selected', cb.checked);
+  updateDbBulkBar();
+}
+
+function updateDbBulkBar() {
+  const bar = document.getElementById('dbBulkBar');
+  const n = dbSelectedIds.size;
+  bar.style.display = n > 0 ? 'flex' : 'none';
+  document.getElementById('dbSelCount').textContent = n + ' selected';
 }
 
 async function toggleBuyerStatus(id, current) {
@@ -1330,12 +1615,11 @@ async function loadOutreach() {
     <div class="outreach-card">
       <h4>\${esc(o.brand)} \${esc(o.model||'')} — \${o.quantity} unit\${o.quantity !== 1 ? 's' : ''}</h4>
       <div class="outreach-meta">
-        \${o.date ? o.date.slice(0,10) : ''} ·
-        \${o.item_type} ·
-        \${o.condition} ·
-        \${o.buyer_ids ? o.buyer_ids.length : 0} buyer(s) contacted
+        \${o.date ? o.date.slice(0,10) : ''} · \${esc(o.item_type||'')} · \${esc(o.condition||'')} · \${(o.buyer_ids||[]).length} buyer(s) contacted
       </div>
-      \${o.gmail_draft_ids && o.gmail_draft_ids.length ? '<div style="margin-top:8px;font-size:.8rem"><span style="color:var(--green)">✓ ' + o.gmail_draft_ids.length + ' Gmail draft(s)</span> · <a href="https://mail.google.com/mail/u/0/#drafts" target="_blank">Open Drafts →</a></div>' : '<div style="margin-top:8px;font-size:.8rem;color:#666">No drafts</div>'}
+      \${o.gmail_draft_ids && o.gmail_draft_ids.length
+        ? '<div style="margin-top:8px;font-size:.8rem"><span style="color:var(--green)">✓ ' + o.gmail_draft_ids.length + ' Gmail draft(s)</span> · <a href="https://mail.google.com/mail/u/0/#drafts" target="_blank">Open Drafts →</a></div>'
+        : '<div style="margin-top:8px;font-size:.8rem;color:#666">No drafts</div>'}
       \${o.notes ? '<div style="margin-top:8px;font-size:.8rem;color:#aaa">' + esc(o.notes) + '</div>' : ''}
     </div>
   \`).join('');
@@ -1346,12 +1630,8 @@ async function loadSettings() {
   checkGmailStatus();
   const r = await fetch('/api/settings').then(r => r.json());
   const thresholds = r.thresholds || [];
-
-  // Also load buyers to show categories
   const br = await fetch('/api/buyers').then(r => r.json());
   const buyers = br.buyers || [];
-
-  // Collect all unique brand+type combos
   const combos = new Map();
   for (const b of buyers) {
     for (const c of (b.categories || [])) {
@@ -1362,25 +1642,18 @@ async function loadSettings() {
   for (const t of thresholds) {
     if (!combos.has(t.key)) combos.set(t.key, { brand: t.brand || '', item_type: t.item_type || '' });
   }
-
   const tMap = {};
   thresholds.forEach(t => tMap[t.key] = t.value);
-
   const el = document.getElementById('thresholdsTable');
   if (!combos.size) {
     el.innerHTML = '<p style="color:#666;font-size:.85rem">No categories yet — run a search to populate.</p>';
     return;
   }
-
   el.innerHTML = '<table><thead><tr><th>Brand</th><th>Item Type</th><th>Min. Buyers</th></tr></thead><tbody>' +
     Array.from(combos.values()).map(c => {
       const key = c.brand + '|' + c.item_type;
       const val = tMap[key] !== undefined ? tMap[key] : 3;
-      return \`<tr>
-        <td>\${esc(c.brand)}</td>
-        <td>\${esc(c.item_type)}</td>
-        <td><input class="inline-edit" type="number" min="1" max="50" data-key="\${esc(key)}" value="\${val}"></td>
-      </tr>\`;
+      return \`<tr><td>\${esc(c.brand)}</td><td>\${esc(c.item_type)}</td><td><input class="inline-edit" type="number" min="1" max="50" data-key="\${esc(key)}" value="\${val}"></td></tr>\`;
     }).join('') + '</tbody></table>';
 }
 
