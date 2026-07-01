@@ -248,12 +248,17 @@ async function runWebSearch(brand, itemType, model) {
     console.log(`[SEARCH] Angle ${i + 1}: ${angle}`);
 
     try {
+      const userMsg = `Search for companies that buy used ${brand} ${itemType}. Use this search query: "${angle}". Return results as a JSON array.`;
+      console.log(`[SEARCH] Angle ${i + 1} prompt →\n  system: ${system.slice(0, 120)}…\n  user: ${userMsg}`);
+
       const resp = await callAnthropic(
-        [{ role: 'user', content: `Search for companies that buy used ${brand} ${itemType}. Use this search query: "${angle}". Return results as a JSON array.` }],
+        [{ role: 'user', content: userMsg }],
         system,
         [{ type: 'web_search', name: 'web_search' }],
         2048
       );
+
+      console.log(`[SEARCH] Angle ${i + 1} initial response — stop_reason: ${resp.stop_reason}, content blocks: ${(resp.content || []).map(b => b.type).join(', ')}`);
 
       // Handle tool use loop
       let finalResp = resp;
@@ -262,6 +267,7 @@ async function runWebSearch(brand, itemType, model) {
         const toolResults = [];
         for (const block of finalResp.content) {
           if (block.type === 'tool_use') {
+            console.log(`[SEARCH] Angle ${i + 1} tool_use block — name: ${block.name}, input: ${JSON.stringify(block.input)}`);
             toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Search executed.' });
           }
         }
@@ -276,11 +282,16 @@ async function runWebSearch(brand, itemType, model) {
           [{ type: 'web_search', name: 'web_search' }],
           2048
         );
+        console.log(`[SEARCH] Angle ${i + 1} follow-up response (iter ${iterations + 1}) — stop_reason: ${finalResp.stop_reason}, blocks: ${(finalResp.content || []).map(b => b.type).join(', ')}`);
         iterations++;
       }
 
       const text = extractTextFromResponse(finalResp);
+      console.log(`[SEARCH] Angle ${i + 1} raw text from final response:\n---\n${text.slice(0, 800)}${text.length > 800 ? '\n…(truncated)' : ''}\n---`);
+
       const parsed = parseJSONSafe(text);
+      console.log(`[SEARCH] Angle ${i + 1} parsed result — type: ${Array.isArray(parsed) ? 'array[' + parsed.length + ']' : typeof parsed}, value: ${JSON.stringify(parsed || null).slice(0, 300)}`);
+
       const companies = Array.isArray(parsed) ? parsed : (parsed && parsed.companies ? parsed.companies : []);
 
       let newThisAngle = 0;
