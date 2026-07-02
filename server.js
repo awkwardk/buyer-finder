@@ -361,8 +361,8 @@ async function lookupBuyerContact(companyName, website) {
   try {
     // Call 1: search — no JSON requirement, just gather facts
     const searchResp = await callOpenRouter(
-      [{ role: 'user', content: `Search for contact information for the company "${companyName}". Their website is ${website || 'unknown'}. Find their contact email address (especially any buying/purchasing department email), phone number, and contact page URL. Summarize everything you find.` }],
-      `You are a researcher finding contact information for equipment buying companies. Search their website and any available sources. Report all contact details you find.`,
+      [{ role: 'user', content: `Search for contact information for the US-based company "${companyName}". Their website is ${website || 'unknown'}. Find their contact email address (especially any buying/purchasing department email), phone number, and contact page URL. Summarize everything you find. Only proceed if this appears to be a US-based company.` }],
+      `You are a researcher finding contact information for US-based equipment buying companies. Search their website and any available sources. Report all contact details you find.`,
       GOOGLE_SEARCH_TOOL,
       1024
     );
@@ -408,7 +408,7 @@ async function runWebSearch(brand, itemType) {
       // Call 1: search — gather research, no JSON requirement
       const searchResp = await callOpenRouter(
         [{ role: 'user', content: `Search for companies that PURCHASE used ${brand} ${itemType} equipment. Use this search query: "${angle}". For each company you find that buys this equipment, report: company name, their own website URL (not a marketplace), any email or phone, and specific evidence they buy equipment (quote from their site).` }],
-        `You are a researcher finding wholesale buyers for used specialty equipment. Search for businesses that actively purchase surplus equipment. Focus on finding companies with "We Buy" pages, surplus dealers, refurbishers, and equipment brokers. Exclude marketplaces like eBay, DOTmed, LabX, Machinio. Report all qualifying buyers you find with their details.`,
+        `You are a researcher finding wholesale buyers for used specialty equipment inside the United States. Search for US-based businesses that actively purchase surplus equipment. Focus on finding companies with "We Buy" pages, surplus dealers, refurbishers, and equipment brokers. Exclude marketplaces like eBay, DOTmed, LabX, Machinio. Report all qualifying US-based buyers you find with their details. IMPORTANT: Only include companies headquartered in the United States. Do not include companies based in other countries including Japan, UK, Germany, Canada, Australia, or anywhere outside the US. If a company is foreign-based, skip it entirely.`,
         GOOGLE_SEARCH_TOOL,
         2048
       );
@@ -423,8 +423,8 @@ async function runWebSearch(brand, itemType) {
 
       // Call 2: parse — extract JSON from research, no tools
       const parseResp = await callOpenRouter(
-        [{ role: 'user', content: `Based on this research about companies that buy used ${brand} ${itemType} equipment:\n\n${research}\n\nExtract all qualifying buyer companies into a JSON array. Each entry must have: company_name, website (company's own domain only, never dotmed/labx/machinio/ebay), email (or null), phone (or null), evidence (quote proving they buy equipment). Exclude any marketplace listing pages. Return ONLY the JSON array, no explanation. If none qualify, return [].` }],
-        `Extract structured buyer company data from research text. Return only a valid JSON array.`,
+        [{ role: 'user', content: `Based on this research about companies that buy used ${brand} ${itemType} equipment:\n\n${research}\n\nExtract all qualifying buyer companies into a JSON array. Each entry must have: company_name, website (company's own domain only, never dotmed/labx/machinio/ebay), email (or null), phone (or null), evidence (quote proving they buy equipment). Exclude any marketplace listing pages. Only extract US-based companies — skip any company that appears to be headquartered outside the United States. A US company will have a US address, US phone number (+1 or area code format), or a .com domain with US contact information. Return ONLY the JSON array, no explanation. If none qualify, return [].` }],
+        `Extract structured buyer company data from research text. Return only a valid JSON array. Only include US-headquartered companies.`,
         null,
         1024
       );
@@ -825,13 +825,21 @@ app.post('/api/buyers/:id/deal', (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Outreach / bulk Gmail drafts — handles both multipart (search flow) and JSON (DB tab flow)
+// ─── Outreach job queue helpers ───────────────────────────────────────────────
+function readOutreachDb() { return readJSON(FILES.outreach, { outreach: [] }); }
+
+function updateOutreachJob(outreachId, updater) {
+  const db = readOutreachDb();
+  const rec = db.outreach.find(o => o.id === outreachId);
+  if (rec) { updater(rec); writeJSON(FILES.outreach, db); }
+}
+
+// Outreach / bulk Gmail drafts — background job with polling
 const outreachUpload = upload.array('photos', 5);
 app.post('/api/outreach', (req, res, next) => {
   if (req.is('multipart/form-data')) return outreachUpload(req, res, next);
   next();
 }, async (req, res) => {
-  const tempPhotoDir = path.join(TEMP_DIR, `outreach_${Date.now()}`);
   try {
     const auth = await getAuthClient();
     if (!auth) return res.status(401).json({ error: 'Gmail not connected. Please connect at /auth' });
@@ -839,7 +847,7 @@ app.post('/api/outreach', (req, res, next) => {
     let { buyer_ids, brand, model, item_type, quantity, condition, notes, search_id } = req.body;
     const ids = typeof buyer_ids === 'string' ? JSON.parse(buyer_ids) : (Array.isArray(buyer_ids) ? buyer_ids : []);
 
-    // Resolve photos — multipart files take priority, then base64 JSON array
+    // Resolve photos — multipart files OR base64 JSON array
     let photoBuffers;
     if (req.files && req.files.length > 0) {
       photoBuffers = req.files.map(f => f.buffer);
@@ -852,7 +860,7 @@ app.post('/api/outreach', (req, res, next) => {
       photoBuffers = [];
     }
 
-    // Change 3: if item details missing, look up from search record
+    // If item details missing, look up from search record
     if ((!brand || !item_type) && search_id) {
       const searchDb = readJSON(FILES.searches, { searches: [] });
       const sr = searchDb.searches.find(s => s.id === search_id);
@@ -866,73 +874,111 @@ app.post('/api/outreach', (req, res, next) => {
       }
     }
 
-    // Save temp photos for attachment, clean up afterward
-    if (photoBuffers.length > 0) fs.mkdirSync(tempPhotoDir, { recursive: true });
+    const outreachId = `outreach_${Date.now()}`;
+    const tempPhotoDir = path.join(TEMP_DIR, outreachId);
 
-    const db = readJSON(FILES.buyers, { buyers: [] });
-    const opts = { brand: brand || '', model: model || '', itemType: item_type || '', quantity: parseInt(quantity) || 1, condition: condition || '', notes: notes || '' };
-    const perBuyerResults = [];
-    const gmailDraftIds = [];
-
-    for (const buyerId of ids) {
-      const buyer = db.buyers.find(b => b.id === buyerId);
-      if (!buyer) {
-        perBuyerResults.push({ buyer_id: buyerId, company_name: 'Unknown', success: false, error: 'Buyer not found' });
-        continue;
-      }
-      try {
-        const draftId = await createGmailDraft(auth, buyer, opts, photoBuffers);
-        gmailDraftIds.push(draftId);
-        buyer.last_contacted = new Date().toISOString();
-        buyer.contact_count = (buyer.contact_count || 0) + 1;
-        perBuyerResults.push({ buyer_id: buyerId, company_name: buyer.company_name, success: true, draft_id: draftId });
-        console.log(`[DRAFT] Created for ${buyer.company_name}: ${draftId}`);
-      } catch (err) {
-        console.error(`[DRAFT] Failed for ${buyer.company_name}:`, err.message);
-        perBuyerResults.push({ buyer_id: buyerId, company_name: buyer.company_name, success: false, error: err.message });
+    // Save photos to per-job temp dir so they survive background processing
+    const photoPaths = [];
+    if (photoBuffers.length > 0) {
+      fs.mkdirSync(tempPhotoDir, { recursive: true });
+      for (let i = 0; i < photoBuffers.length; i++) {
+        const p = path.join(tempPhotoDir, `photo_${i + 1}.jpg`);
+        fs.writeFileSync(p, photoBuffers[i]);
+        photoPaths.push(p);
       }
     }
 
-    writeJSON(FILES.buyers, db);
-
-    const outreachDb = readJSON(FILES.outreach, { outreach: [] });
-    const outreachId = `outreach_${Date.now()}`;
-    outreachDb.outreach.unshift({
+    // Save job record immediately
+    const db = readOutreachDb();
+    const jobRecord = {
       id: outreachId,
+      status: 'processing',
       brand: brand || '',
       item_type: item_type || '',
       model: model || '',
       quantity: parseInt(quantity) || 1,
       condition: condition || '',
-      buyer_ids: ids,
-      draft_created: gmailDraftIds.length > 0,
-      gmail_draft_ids: gmailDraftIds,
-      date: new Date().toISOString(),
       notes: notes || '',
-    });
-    writeJSON(FILES.outreach, outreachDb);
+      buyer_ids: ids,
+      photo_paths: photoPaths,
+      results: [],
+      gmail_draft_ids: [],
+      created_at: new Date().toISOString(),
+    };
+    db.outreach.unshift(jobRecord);
+    writeJSON(FILES.outreach, db);
 
-    const succeeded = perBuyerResults.filter(r => r.success).length;
-    res.json({
-      success: true,
-      outreach_id: outreachId,
-      total: ids.length,
-      succeeded,
-      failed: ids.length - succeeded,
-      results: perBuyerResults,
-      gmail_draft_ids: gmailDraftIds,
-    });
+    console.log(`[OUTREACH] ${outreachId} queued — ${ids.length} buyers`);
+    res.status(202).json({ outreach_id: outreachId, status: 'processing', total: ids.length });
+
+    // Process drafts in background
+    (async () => {
+      try {
+        const opts = { brand: brand || '', model: model || '', itemType: item_type || '', quantity: parseInt(quantity) || 1, condition: condition || '', notes: notes || '' };
+        // Re-load photo buffers from saved paths
+        const savedBuffers = photoPaths.map(p => fs.readFileSync(p));
+
+        for (const buyerId of ids) {
+          const buyersDb = readJSON(FILES.buyers, { buyers: [] });
+          const buyer = buyersDb.buyers.find(b => b.id === buyerId);
+          if (!buyer) {
+            updateOutreachJob(outreachId, rec => {
+              rec.results.push({ buyer_id: buyerId, company_name: 'Unknown', success: false, error: 'Buyer not found' });
+            });
+            continue;
+          }
+          try {
+            const draftId = await createGmailDraft(auth, buyer, opts, savedBuffers);
+            buyer.last_contacted = new Date().toISOString();
+            buyer.contact_count = (buyer.contact_count || 0) + 1;
+            writeJSON(FILES.buyers, buyersDb);
+            updateOutreachJob(outreachId, rec => {
+              rec.results.push({ buyer_id: buyerId, company_name: buyer.company_name, success: true, draft_id: draftId });
+              rec.gmail_draft_ids.push(draftId);
+            });
+            console.log(`[DRAFT] Created for ${buyer.company_name}: ${draftId}`);
+          } catch (err) {
+            console.error(`[DRAFT] Failed for ${buyer.company_name}:`, err.message);
+            updateOutreachJob(outreachId, rec => {
+              rec.results.push({ buyer_id: buyerId, company_name: buyer.company_name, success: false, error: err.message });
+            });
+          }
+        }
+
+        // Mark complete
+        updateOutreachJob(outreachId, rec => {
+          rec.status = 'complete';
+          rec.completed_at = new Date().toISOString();
+          rec.draft_created = rec.gmail_draft_ids.length > 0;
+        });
+        console.log(`[OUTREACH] ${outreachId} complete`);
+      } catch (err) {
+        console.error(`[OUTREACH] ${outreachId} crashed:`, err.message);
+        updateOutreachJob(outreachId, rec => { rec.status = 'failed'; rec.error = err.message; });
+      } finally {
+        // Clean up temp photos after job completes
+        try { if (fs.existsSync(tempPhotoDir)) fs.rmSync(tempPhotoDir, { recursive: true }); } catch(_) {}
+      }
+    })();
+
   } catch (err) {
-    console.error('[OUTREACH] Error:', err.message);
+    console.error('[OUTREACH] Queue error:', err.message);
     res.status(500).json({ error: err.message });
-  } finally {
-    // Clean up temp photos whether success or failure
-    try { if (fs.existsSync(tempPhotoDir)) fs.rmSync(tempPhotoDir, { recursive: true }); } catch(_) {}
   }
 });
 
+// Poll outreach job status
+app.get('/api/outreach/:outreach_id', (req, res) => {
+  try {
+    const db = readOutreachDb();
+    const rec = db.outreach.find(o => o.id === req.params.outreach_id);
+    if (!rec) return res.status(404).json({ error: 'Outreach job not found' });
+    res.json(rec);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/outreach', (_, res) => {
-  try { res.json(readJSON(FILES.outreach, { outreach: [] })); }
+  try { res.json(readOutreachDb()); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1663,7 +1709,7 @@ async function submitOutreachForm() {
     </div>
     <div id="progressSummary" style="font-size:.85rem;color:#aaa;margin-top:8px"></div>
     <div class="modal-actions" id="progressActions" style="display:none">
-      <a href="https://mail.google.com/mail/u/0/#drafts" target="_blank" class="btn btn-green">Open Gmail Drafts →\${esc(gmailLabel)}</a>
+      <a href="https://mail.google.com/mail/u/kendall@xtremeelectronicrecycling.com/#drafts" target="_blank" class="btn btn-green">Open Gmail Drafts →\${esc(gmailLabel)}</a>
       <button class="btn btn-outline" onclick="closeModal()">Close</button>
     </div>
   \`;
@@ -1677,15 +1723,7 @@ async function submitOutreachForm() {
       body: JSON.stringify(payload),
     }).then(r => r.json());
     if (r.error) throw new Error(r.error);
-
-    const pList = document.getElementById('progressList');
-    pList.innerHTML = (r.results || []).map(res =>
-      res.success
-        ? \`<div class="progress-item"><span class="pi-ok">✓</span><span class="pi-ok">Draft created — \${esc(res.company_name)}</span></div>\`
-        : \`<div class="progress-item"><span class="pi-fail">✗</span><span class="pi-fail">Failed — \${esc(res.company_name)}: \${esc(res.error || 'unknown')}</span></div>\`
-    ).join('');
-    document.getElementById('progressSummary').textContent = 'Complete: ' + r.succeeded + ' of ' + r.total + ' drafts created.';
-    document.getElementById('progressActions').style.display = 'flex';
+    pollOutreachJob(r.outreach_id, r.total, gmailLabel);
   } catch(err) {
     document.getElementById('progressList').innerHTML = '<div style="color:#f66">Error: ' + esc(err.message) + '</div>';
     document.getElementById('progressActions').style.display = 'flex';
@@ -1704,7 +1742,7 @@ async function runBulkDrafts(buyerIds, photos, overrideMeta) {
     <div id="progressList" style="margin:16px 0;max-height:300px;overflow-y:auto"></div>
     <div id="progressSummary" style="font-size:.85rem;color:#aaa;margin-top:8px"></div>
     <div class="modal-actions" id="progressActions" style="display:none">
-      <a href="https://mail.google.com/mail/u/0/#drafts" target="_blank" class="btn btn-green">Open Gmail Drafts →\${esc(gmailLabel)}</a>
+      <a href="https://mail.google.com/mail/u/kendall@xtremeelectronicrecycling.com/#drafts" target="_blank" class="btn btn-green">Open Gmail Drafts →\${esc(gmailLabel)}</a>
       <button class="btn btn-outline" onclick="closeModal()">Close</button>
     </div>
   \`;
@@ -1739,22 +1777,120 @@ async function runBulkDrafts(buyerIds, photos, overrideMeta) {
   try {
     const r = await fetch('/api/outreach', { method: 'POST', body: fd }).then(r => r.json());
     if (r.error) throw new Error(r.error);
-
-    // Update progress items with results
-    (r.results || []).forEach((res, i) => {
-      const el = document.getElementById('pi_' + i);
-      if (!el) return;
-      if (res.success) {
-        el.innerHTML = '<span class="pi-ok">✓</span> <span class="pi-ok">Draft created — ' + esc(res.company_name) + '</span>';
-      } else {
-        el.innerHTML = '<span class="pi-fail">✗</span> <span class="pi-fail">Failed — ' + esc(res.company_name) + ': ' + esc(res.error || 'unknown error') + '</span>';
-      }
-    });
-
-    document.getElementById('progressSummary').textContent = 'Complete: ' + r.succeeded + ' of ' + r.total + ' drafts created.';
-    document.getElementById('progressActions').style.display = 'flex';
+    pollOutreachJob(r.outreach_id, r.total, gmailLabel, buyerMap);
   } catch(err) {
     pList.innerHTML = '<div style="color:#f66">Error: ' + esc(err.message) + '</div>';
+    document.getElementById('progressActions').style.display = 'flex';
+  }
+}
+
+// ── Outreach job polling ───────────────────────────────────────────────────
+let outreachPollTimer = null;
+
+function pollOutreachJob(outreachId, total, gmailLabel, buyerMap) {
+  if (outreachPollTimer) clearInterval(outreachPollTimer);
+  const seenResults = new Set();
+
+  outreachPollTimer = setInterval(async () => {
+    try {
+      const job = await fetch('/api/outreach/' + outreachId).then(r => r.json());
+      if (job.error) throw new Error(job.error);
+
+      // Render any new per-buyer results
+      const pList = document.getElementById('progressList');
+      if (pList) {
+        (job.results || []).forEach((res, i) => {
+          if (seenResults.has(i)) return;
+          seenResults.add(i);
+          const name = (buyerMap && buyerMap[res.buyer_id]) ? buyerMap[res.buyer_id] : res.company_name;
+          // Replace or append progress item
+          let el = document.getElementById('pi_' + i);
+          if (!el) {
+            el = document.createElement('div');
+            el.className = 'progress-item';
+            el.id = 'pi_' + i;
+            pList.appendChild(el);
+          }
+          if (res.success) {
+            el.innerHTML = '<span class="pi-ok">✓</span> <span class="pi-ok">Draft created — ' + esc(name) + '</span>';
+          } else {
+            el.innerHTML = '<span class="pi-fail">✗</span> <span class="pi-fail">Failed — ' + esc(name) + ': ' + esc(res.error || 'unknown') + '</span>';
+          }
+        });
+
+        // Show in-progress count while running
+        if (job.status === 'processing') {
+          const summEl = document.getElementById('progressSummary');
+          if (summEl) summEl.textContent = (job.results || []).length + ' of ' + total + ' processed…';
+        }
+      }
+
+      if (job.status === 'complete' || job.status === 'failed') {
+        clearInterval(outreachPollTimer);
+        outreachPollTimer = null;
+
+        const succeeded = (job.results || []).filter(r => r.success).length;
+        const failed = (job.results || []).filter(r => !r.success).length;
+        const failedIds = (job.results || []).filter(r => !r.success).map(r => r.buyer_id);
+
+        const summEl = document.getElementById('progressSummary');
+        if (summEl) summEl.textContent = job.status === 'failed'
+          ? 'Job failed: ' + (job.error || 'unknown error')
+          : 'Complete: ' + succeeded + ' of ' + total + ' drafts created.' + (failed > 0 ? ' ' + failed + ' failed.' : '');
+
+        const actEl = document.getElementById('progressActions');
+        if (actEl) {
+          actEl.style.display = 'flex';
+          actEl.innerHTML = \`
+            <a href="https://mail.google.com/mail/u/kendall@xtremeelectronicrecycling.com/#drafts" target="_blank" class="btn btn-green">Open Gmail Drafts →\${esc(gmailLabel)}</a>
+            \${failed > 0 ? '<button class="btn btn-gold" onclick="retryFailedDrafts(' + JSON.stringify(failedIds) + ')">Retry Failed (' + failed + ')</button>' : ''}
+            <button class="btn btn-outline" onclick="closeModal()">Close</button>
+          \`;
+        }
+      }
+    } catch (err) {
+      clearInterval(outreachPollTimer);
+      outreachPollTimer = null;
+      const pList = document.getElementById('progressList');
+      if (pList) pList.innerHTML += '<div style="color:#f66;font-size:.82rem">Poll error: ' + esc(err.message) + '</div>';
+      const actEl = document.getElementById('progressActions');
+      if (actEl) actEl.style.display = 'flex';
+    }
+  }, 3000);
+}
+
+async function retryFailedDrafts(failedBuyerIds) {
+  if (!failedBuyerIds || !failedBuyerIds.length) return;
+  // Re-open progress modal and kick off new outreach job for failed buyers
+  const gmailLabel = connectedEmail ? \` (\${connectedEmail})\` : '';
+  document.getElementById('modalContent').innerHTML = \`
+    <h3>Retrying Failed Drafts</h3>
+    <div id="progressList" style="margin:16px 0;max-height:300px;overflow-y:auto">
+      <div class="progress-item"><span class="loader"></span><span class="pi-pending">Starting retry for \${failedBuyerIds.length} buyer(s)...</span></div>
+    </div>
+    <div id="progressSummary" style="font-size:.85rem;color:#aaa;margin-top:8px"></div>
+    <div class="modal-actions" id="progressActions" style="display:none">
+      <a href="https://mail.google.com/mail/u/kendall@xtremeelectronicrecycling.com/#drafts" target="_blank" class="btn btn-green">Open Gmail Drafts →\${esc(gmailLabel)}</a>
+      <button class="btn btn-outline" onclick="closeModal()">Close</button>
+    </div>
+  \`;
+  openModal();
+  try {
+    const meta = currentSearchMeta || {};
+    const fd = new FormData();
+    fd.append('buyer_ids', JSON.stringify(failedBuyerIds));
+    fd.append('brand', meta.brand || '');
+    fd.append('model', meta.model || '');
+    fd.append('item_type', meta.itemType || '');
+    fd.append('quantity', meta.quantity || 1);
+    fd.append('condition', meta.condition || '');
+    fd.append('notes', meta.notes || '');
+    if (currentSearchId) fd.append('search_id', currentSearchId);
+    const r = await fetch('/api/outreach', { method: 'POST', body: fd }).then(r => r.json());
+    if (r.error) throw new Error(r.error);
+    pollOutreachJob(r.outreach_id, r.total, gmailLabel);
+  } catch (err) {
+    document.getElementById('progressList').innerHTML = '<div style="color:#f66">Retry error: ' + esc(err.message) + '</div>';
     document.getElementById('progressActions').style.display = 'flex';
   }
 }
@@ -2017,18 +2153,26 @@ async function loadOutreach() {
     list.innerHTML = '<div class="empty-state"><div style="font-size:2rem">📬</div><div style="margin-top:8px;color:#666">No outreach records yet.</div></div>';
     return;
   }
-  list.innerHTML = records.map(o => \`
-    <div class="outreach-card">
-      <h4>\${esc(o.brand)} \${esc(o.model||'')} — \${o.quantity} unit\${o.quantity !== 1 ? 's' : ''}</h4>
+  list.innerHTML = records.map(o => {
+    const dateStr = (o.date || o.created_at || '').slice(0, 10);
+    const draftCount = (o.gmail_draft_ids || []).length;
+    const failedCount = (o.results || []).filter(r => !r.success).length;
+    const statusBadge = o.status === 'processing'
+      ? '<span style="color:var(--gold);font-size:.75rem">⏳ Processing…</span>'
+      : o.status === 'failed' ? '<span style="color:#f66;font-size:.75rem">✗ Failed</span>'
+      : '';
+    return \`<div class="outreach-card">
+      <h4>\${esc(o.brand)} \${esc(o.model||'')} — \${o.quantity} unit\${o.quantity !== 1 ? 's' : ''} \${statusBadge}</h4>
       <div class="outreach-meta">
-        \${o.date ? o.date.slice(0,10) : ''} · \${esc(o.item_type||'')} · \${esc(o.condition||'')} · \${(o.buyer_ids||[]).length} buyer(s) contacted
+        \${dateStr} · \${esc(o.item_type||'')} · \${esc(o.condition||'')} · \${(o.buyer_ids||[]).length} buyer(s) contacted
       </div>
-      \${o.gmail_draft_ids && o.gmail_draft_ids.length
-        ? '<div style="margin-top:8px;font-size:.8rem"><span style="color:var(--green)">✓ ' + o.gmail_draft_ids.length + ' Gmail draft(s)</span> · <a href="https://mail.google.com/mail/u/0/#drafts" target="_blank">Open Drafts →</a>' + (connectedEmail ? ' <span style="color:#555">(' + esc(connectedEmail) + ')</span>' : '') + '</div>'
-        : '<div style="margin-top:8px;font-size:.8rem;color:#666">No drafts</div>'}
+      \${draftCount > 0
+        ? '<div style="margin-top:8px;font-size:.8rem"><span style="color:var(--green)">✓ ' + draftCount + ' Gmail draft(s)</span> · <a href="https://mail.google.com/mail/u/kendall@xtremeelectronicrecycling.com/#drafts" target="_blank">Open Drafts →</a>' + (connectedEmail ? ' <span style="color:#555">(' + esc(connectedEmail) + ')</span>' : '') + '</div>'
+        : '<div style="margin-top:8px;font-size:.8rem;color:#666">No drafts created</div>'}
+      \${failedCount > 0 ? '<div style="margin-top:4px;font-size:.78rem;color:#f66">' + failedCount + ' draft(s) failed</div>' : ''}
       \${o.notes ? '<div style="margin-top:8px;font-size:.8rem;color:#aaa">' + esc(o.notes) + '</div>' : ''}
-    </div>
-  \`).join('');
+    </div>\`;
+  }).join('');
 }
 
 // ── Settings ───────────────────────────────────────────────────────────────
