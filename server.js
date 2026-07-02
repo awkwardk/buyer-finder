@@ -352,17 +352,32 @@ function saveBuyersToDb(newBuyers, brand, itemType) {
 }
 
 // ─── Contact info lookup ─────────────────────────────────────────────────────
-const GOOGLE_SEARCH_TOOL = [{ type: 'function', function: { name: 'google_search', description: 'Search Google for information', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } }];
+const GOOGLE_SEARCH_TOOL = [{
+  type: 'openrouter:web_search',
+  parameters: { engine: 'native', max_results: 5, search_context_size: 'medium' },
+}];
 
 async function lookupBuyerContact(companyName, website) {
   try {
-    const resp = await callOpenRouter(
-      [{ role: 'user', content: `Find the contact email and phone number for ${companyName} at ${website}. Look for a buying/selling equipment contact email, general contact email, and phone number. Return JSON only: { email, phone, contact_page }. Use null for fields not found.` }],
-      `Find contact information for companies that buy used equipment. Search their website and any available sources.`,
+    // Call 1: search — no JSON requirement, just gather facts
+    const searchResp = await callOpenRouter(
+      [{ role: 'user', content: `Search for contact information for the company "${companyName}". Their website is ${website || 'unknown'}. Find their contact email address (especially any buying/purchasing department email), phone number, and contact page URL. Summarize everything you find.` }],
+      `You are a researcher finding contact information for equipment buying companies. Search their website and any available sources. Report all contact details you find.`,
       GOOGLE_SEARCH_TOOL,
-      512
+      1024
     );
-    const text = extractTextFromResponse(resp);
+    const research = extractTextFromResponse(searchResp);
+    if (!research) return null;
+    console.log(`[CONTACT] Research for ${companyName}: ${research.slice(0, 200)}…`);
+
+    // Call 2: parse — no tools, extract JSON from research
+    const parseResp = await callOpenRouter(
+      [{ role: 'user', content: `Based on this research about ${companyName}:\n\n${research}\n\nExtract the contact information and return ONLY a JSON object with these fields: { "email": string or null, "phone": string or null, "contact_page": string or null }. No explanation, just the JSON object.` }],
+      `Extract structured contact information from research text. Return only valid JSON.`,
+      null,
+      256
+    );
+    const text = extractTextFromResponse(parseResp);
     const parsed = parseJSONSafe(text);
     return parsed && typeof parsed === 'object' ? parsed : null;
   } catch (err) {
@@ -381,34 +396,6 @@ async function runWebSearch(brand, itemType) {
     `${brand} equipment broker "sell your" used`,
   ];
 
-  // Change 3: improved system prompt that finds actual buyers, not marketplaces
-  const system = `You are a researcher finding companies that PURCHASE used specialty equipment directly from sellers and resellers. You are finding BUYERS, not sellers.
-
-TARGET companies that:
-- Have a "We Buy" or "Sell Your Equipment" page
-- Advertise they purchase used/surplus equipment
-- Are surplus dealers that buy direct from businesses
-- Are refurbishers that acquire used equipment
-- Are equipment brokers that pay cash for equipment
-- Explicitly state they buy ${brand} ${itemType}
-
-DO NOT include any of these:
-- eBay listings or eBay sellers
-- DOTmed listings (unless the company itself buys equipment directly, not just lists on DOTmed)
-- LabX listings
-- Machinio listings
-- Biomedis listings
-- Any marketplace platform listing pages
-- Companies that ONLY sell equipment, not buy
-- Individual sellers listing single items
-
-For website field: use the company's OWN website, never a marketplace listing URL like dotmed.com, labx.com, machinio.com, ebay.com, or similar.
-
-For each qualifying buyer company return:
-{ company_name, website (must be company's own domain), email or null, phone or null, evidence (specific proof they BUY equipment — quote their "we buy" page or explicit purchase statement) }
-
-Return ONLY as a JSON array. If no qualifying buyers found for this search angle, return empty array []. Do not include any explanation text outside the JSON.`;
-
   const allBuyers = new Map();
   let consecutiveEmpty = 0;
 
@@ -418,22 +405,32 @@ Return ONLY as a JSON array. If no qualifying buyers found for this search angle
     console.log(`[SEARCH] Angle ${i + 1}: ${angle}`);
 
     try {
-      const userMsg = `Search for companies that PURCHASE used ${brand} ${itemType} equipment. Search query: "${angle}". Return ONLY a JSON array of buyer companies with fields: company_name, website, email, phone, evidence.`;
-
-      const resp = await callOpenRouter(
-        [{ role: 'user', content: userMsg }],
-        system,
+      // Call 1: search — gather research, no JSON requirement
+      const searchResp = await callOpenRouter(
+        [{ role: 'user', content: `Search for companies that PURCHASE used ${brand} ${itemType} equipment. Use this search query: "${angle}". For each company you find that buys this equipment, report: company name, their own website URL (not a marketplace), any email or phone, and specific evidence they buy equipment (quote from their site).` }],
+        `You are a researcher finding wholesale buyers for used specialty equipment. Search for businesses that actively purchase surplus equipment. Focus on finding companies with "We Buy" pages, surplus dealers, refurbishers, and equipment brokers. Exclude marketplaces like eBay, DOTmed, LabX, Machinio. Report all qualifying buyers you find with their details.`,
         GOOGLE_SEARCH_TOOL,
         2048
       );
 
-      const _msg = resp.choices && resp.choices[0] && resp.choices[0].message;
-      const _toolCalls = (_msg && _msg.tool_calls) ? _msg.tool_calls.map(t => t.function && t.function.name).join(',') : 'none';
-      console.log(`[SEARCH] Angle ${i + 1} — finish_reason: ${resp.choices?.[0]?.finish_reason}, tool_calls: ${_toolCalls}`);
-      if (resp.error) console.log(`[SEARCH] Angle ${i + 1} API error:`, JSON.stringify(resp.error));
+      console.log(`[SEARCH] Angle ${i + 1} — finish_reason: ${searchResp.choices?.[0]?.finish_reason}`);
+      if (searchResp.error) console.log(`[SEARCH] Angle ${i + 1} API error:`, JSON.stringify(searchResp.error));
 
-      const text = extractTextFromResponse(resp);
-      console.log(`[SEARCH] Angle ${i + 1} raw text:\n---\n${text.slice(0, 600)}${text.length > 600 ? '\n…(truncated)' : ''}\n---`);
+      const research = extractTextFromResponse(searchResp);
+      console.log(`[SEARCH] Angle ${i + 1} research:\n---\n${research.slice(0, 600)}${research.length > 600 ? '\n…(truncated)' : ''}\n---`);
+
+      if (!research) { consecutiveEmpty++; continue; }
+
+      // Call 2: parse — extract JSON from research, no tools
+      const parseResp = await callOpenRouter(
+        [{ role: 'user', content: `Based on this research about companies that buy used ${brand} ${itemType} equipment:\n\n${research}\n\nExtract all qualifying buyer companies into a JSON array. Each entry must have: company_name, website (company's own domain only, never dotmed/labx/machinio/ebay), email (or null), phone (or null), evidence (quote proving they buy equipment). Exclude any marketplace listing pages. Return ONLY the JSON array, no explanation. If none qualify, return [].` }],
+        `Extract structured buyer company data from research text. Return only a valid JSON array.`,
+        null,
+        1024
+      );
+
+      const text = extractTextFromResponse(parseResp);
+      console.log(`[SEARCH] Angle ${i + 1} parsed text:\n---\n${text.slice(0, 400)}${text.length > 400 ? '\n…' : ''}\n---`);
 
       const parsed = parseJSONSafe(text);
       console.log(`[SEARCH] Angle ${i + 1} parsed: ${Array.isArray(parsed) ? 'array[' + parsed.length + ']' : typeof parsed}`);
