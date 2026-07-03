@@ -911,14 +911,18 @@ app.post('/api/outreach', (req, res, next) => {
     console.log(`[OUTREACH] ${outreachId} queued — ${ids.length} buyers`);
     res.status(202).json({ outreach_id: outreachId, status: 'processing', total: ids.length });
 
-    // Process drafts in background
+    // Process drafts in background — one buyer at a time to avoid memory spike
     (async () => {
       try {
         const opts = { brand: brand || '', model: model || '', itemType: item_type || '', quantity: parseInt(quantity) || 1, condition: condition || '', notes: notes || '' };
-        // Re-load photo buffers from saved paths
-        const savedBuffers = photoPaths.map(p => fs.readFileSync(p));
 
-        for (const buyerId of ids) {
+        for (let idx = 0; idx < ids.length; idx++) {
+          const buyerId = ids[idx];
+
+          // Memory log at start of each buyer
+          const mem = process.memoryUsage();
+          console.log(`[MEMORY] Buyer ${idx + 1} of ${ids.length} — heap used: ${Math.round(mem.heapUsed / 1024 / 1024)}MB / heap total: ${Math.round(mem.heapTotal / 1024 / 1024)}MB`);
+
           const buyersDb = readJSON(FILES.buyers, { buyers: [] });
           const buyer = buyersDb.buyers.find(b => b.id === buyerId);
           if (!buyer) {
@@ -928,7 +932,12 @@ app.post('/api/outreach', (req, res, next) => {
             continue;
           }
           try {
-            const draftId = await createGmailDraft(auth, buyer, opts, savedBuffers);
+            // Load photos for THIS buyer only — released after draft is created
+            let buyerPhotoBuffers = photoPaths.map(p => fs.readFileSync(p));
+            const draftId = await createGmailDraft(auth, buyer, opts, buyerPhotoBuffers);
+            // Null out photo data immediately to allow GC
+            buyerPhotoBuffers = null;
+
             buyer.last_contacted = new Date().toISOString();
             buyer.contact_count = (buyer.contact_count || 0) + 1;
             writeJSON(FILES.buyers, buyersDb);
@@ -943,6 +952,10 @@ app.post('/api/outreach', (req, res, next) => {
               rec.results.push({ buyer_id: buyerId, company_name: buyer.company_name, success: false, error: err.message });
             });
           }
+
+          // Hint GC and yield event loop between buyers
+          if (typeof global.gc === 'function') global.gc();
+          await new Promise(r => setTimeout(r, 100));
         }
 
         // Mark complete
@@ -956,7 +969,7 @@ app.post('/api/outreach', (req, res, next) => {
         console.error(`[OUTREACH] ${outreachId} crashed:`, err.message);
         updateOutreachJob(outreachId, rec => { rec.status = 'failed'; rec.error = err.message; });
       } finally {
-        // Clean up temp photos after job completes
+        // Clean up temp photos after ALL buyers processed
         try { if (fs.existsSync(tempPhotoDir)) fs.rmSync(tempPhotoDir, { recursive: true }); } catch(_) {}
       }
     })();
